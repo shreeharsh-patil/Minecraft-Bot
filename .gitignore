@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Environment / secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-install.log
+npm-install.err.log
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Runtime state (persistent memory snapshots)
+data/
+*.local.json
+
+# Test output
+coverage/
+test-out.txt
+smoke*.txt
+t.txt
+
+# Transient scratch output from tooling
+eslint-*.txt
+final-vitest.txt
+vitest-*.json

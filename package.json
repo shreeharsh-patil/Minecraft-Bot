@@ -1,0 +1,37 @@
+{
+  "name": "minecraft-ai-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Intelligent Minecraft Java Edition companion bot (Mineflayer + multi-provider LLM planning)",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "mineflayer": "^4.33.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "vec3": "^0.1.10"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/mineflayer-pathfinder": "^2.4.5",
+    "@types/node": "^24.10.1",
+    "eslint": "^9.39.1",
+    "globals": "^16.5.0",
+    "tsx": "^4.20.7",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1",
+    "vitest": "^3.2.4"
+  }
+}
