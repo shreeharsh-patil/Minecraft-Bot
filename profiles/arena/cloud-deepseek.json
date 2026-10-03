@@ -1,0 +1,8 @@
+{
+  "name": "ARENA_DEEPSEEK",
+  "model": {
+    "api": "openai",
+    "model": "deepseek-v4-flash-0731"
+  },
+  "cooldown": 0
+}

@@ -1,0 +1,8 @@
+{
+  "name": "ARENA_NEMOTRON",
+  "model": {
+    "api": "openai",
+    "model": "nemotron-3-super-120b-a12b"
+  },
+  "cooldown": 0
+}

@@ -1,0 +1,55 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { observeBot, observePrompter } from '../telemetry/runtime.js';
+import { ActionManager } from '../../src/agent/action_manager.js';
+
+test('real ActionManager emits truthful false, successful, interrupted outcomes; pause blocks actions', async t => {
+    const oldSend = process.send, oldConnected = process.connected, oldArena = process.env.ARENA_WORKER;
+    const events = [];
+    process.env.ARENA_WORKER = '1'; process.connected = true; process.send = event => events.push(event);
+    t.after(() => { process.send = oldSend; process.connected = oldConnected; if (oldArena === undefined) delete process.env.ARENA_WORKER; else process.env.ARENA_WORKER = oldArena; });
+    const bot = new EventEmitter();
+    Object.assign(bot, { health: 20, food: 18, output: '', version: 'TEST', game: { dimension: 'overworld' }, entities: {}, chat() {}, placeBlock: async () => true, craft: async () => true, consume: async () => true });
+    const agent = { bot, arenaPaused: false, history: { summarizeMemories: async () => {}, memory: 'test memory' }, clearBotLogs() { bot.output = ''; bot.interrupt_code = false; }, isIdle: () => true, self_prompter: { isActive: () => false } };
+    agent.actions = new ActionManager(agent);
+    const cleanup = observeBot(agent); t.after(cleanup);
+    bot.emit('spawn'); bot.emit('health');
+    await agent.actions.runAction('action:craftRecipe', async () => false);
+    await agent.actions.runAction('action:collectBlocks', async () => true);
+    await agent.actions.runAction('action:walk', async () => { bot.interrupt_code = true; });
+    assert.equal(events.filter(e => e.type === 'action_failed').length, 1);
+    assert.equal(events.filter(e => e.type === 'action_completed').length, 1);
+    assert.equal(events.filter(e => e.type === 'action_interrupted').length, 1);
+    agent.arenaPaused = true;
+    let ran = false; await agent.actions.runAction('action:mine', async () => { ran = true; }); assert.equal(ran, false);
+    await assert.rejects(bot.placeBlock(), /paused/);
+    agent.arenaPaused = false;
+    await bot.craft({ result: { count: 4 } }, 2);
+    assert.equal(events.find(e => e.type === 'stat_increment' && e.payload.stat === 'itemsCrafted').payload.amount, 8);
+    agent.history.memory = '<think>private reasoning</think>Built a crafting table.';
+    await agent.history.summarizeMemories();
+    assert.equal(events.filter(e => e.type === 'memory_created').at(-1).payload.summary, 'Built a crafting table.');
+    agent.history.memory = '<think>unfinished private reasoning';
+    await agent.history.summarizeMemories();
+    assert.equal(events.filter(e => e.type === 'memory_created').at(-1).payload.summary, '');
+    // Upstream resumable actions require an assert import; exercise that branch.
+    await agent.actions.resumeAction('action:follow', async () => true);
+    assert.ok(events.some(e => e.type === 'action_started' && e.payload.action === 'follow'));
+});
+test('model observability records latency and errors without logging model response text', async t => {
+    const oldSend = process.send, oldConnected = process.connected, oldArena = process.env.ARENA_WORKER;
+    const events = [];
+    process.env.ARENA_WORKER = '1'; process.connected = true; process.send = event => events.push(event);
+    t.after(() => { process.send = oldSend; process.connected = oldConnected; if (oldArena === undefined) delete process.env.ARENA_WORKER; else process.env.ARENA_WORKER = oldArena; });
+    const model = { sendRequest: async () => '<think>private provider reasoning</think>!stats' };
+    observePrompter({ profile: { model: { api: 'ollama', model: 'test' } }, chat_model: model });
+    const text = await model.sendRequest(); assert.match(text, /!stats/);
+    assert.equal(events.filter(e => e.type === 'model_request_started').length, 1);
+    assert.ok(events.some(e => e.type === 'model_response_received'));
+    assert.ok(!JSON.stringify(events).includes('private provider reasoning'));
+    const failing = { sendRequest: async () => { throw Object.assign(new Error('too many requests'), { status: 429 }); } };
+    observePrompter({ profile: { model: { api: 'google', model: 'test' } }, chat_model: failing });
+    await assert.rejects(failing.sendRequest());
+    assert.ok(events.some(e => e.type === 'error' && /rate limited/.test(e.payload.message)));
+});

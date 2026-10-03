@@ -1,0 +1,44 @@
+{
+  "port": 8790,
+  "minecraft": {
+    "host": "localhost",
+    "port": 55916,
+    "version": "auto"
+  },
+  "goal": "You are an autonomous Minecraft agent. Survive, explore, gather resources, improve your capabilities and progress through Minecraft as far as you can. Decide your own intermediate objectives. Do not wait for a human to give you routine instructions.",
+  "agents": [
+    {
+      "id": "gemini",
+      "enabled": true,
+      "displayName": "GEMINI",
+      "profilePath": "profiles/arena/cloud-gemini.json",
+      "color": "#9fbaa2",
+      "brain": "gemini"
+    },
+    {
+      "id": "deepseek",
+      "enabled": false,
+      "displayName": "DEEPSEEK",
+      "profilePath": "profiles/arena/cloud-deepseek.json",
+      "color": "#90b8ce",
+      "brain": "deepseek"
+    },
+    {
+      "id": "gpt",
+      "enabled": false,
+      "displayName": "GPT",
+      "profilePath": "profiles/arena/cloud-gpt.json",
+      "color": "#cab393",
+      "brain": "gpt"
+    },
+    {
+      "id": "nemotron",
+      "enabled": false,
+      "displayName": "NEMOTRON",
+      "profilePath": "profiles/arena/cloud-nemotron.json",
+      "color": "#b6a3c9",
+      "brain": "nemotron"
+    }
+  ],
+  "endurance": true
+}

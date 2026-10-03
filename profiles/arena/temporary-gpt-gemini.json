@@ -1,0 +1,8 @@
+{
+  "name": "ARENA_GEMINI",
+  "model": {
+    "api": "openai",
+    "model": "gpt-oss-120b"
+  },
+  "cooldown": 0
+}

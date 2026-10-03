@@ -1,0 +1,1 @@
+{ "name": "ARENA_GEMINI", "model": { "api": "google", "model": "gemini-flash-latest" }, "cooldown": 3000 }

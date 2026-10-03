@@ -1,0 +1,80 @@
+diff --git a/node_modules/mineflayer/lib/plugins/digging.js b/node_modules/mineflayer/lib/plugins/digging.js
+index 496cf63..813a667 100644
+--- a/node_modules/mineflayer/lib/plugins/digging.js
++++ b/node_modules/mineflayer/lib/plugins/digging.js
+@@ -242,11 +242,14 @@ function inject (bot) {
+       enchantments = enchantments.concat(helmetEnchantments)
+     }
+ 
++    if (block.material === 'incorrect_for_wooden_tool')
++      block.material = 'mineable/pickaxe'
++
+     const creative = bot.game.gameMode === 'creative'
+     return block.digTime(
+       type,
+       creative,
+-      bot.entity.isInWater,
++      false, // isInWater, water calc is bugged, so always false
+       !bot.entity.onGround,
+       enchantments,
+       bot.entity.effects
+diff --git a/node_modules/mineflayer/lib/plugins/entities.js b/node_modules/mineflayer/lib/plugins/entities.js
+index 666b0b3..e21f78c 100644
+--- a/node_modules/mineflayer/lib/plugins/entities.js
++++ b/node_modules/mineflayer/lib/plugins/entities.js
+@@ -271,7 +271,9 @@ function inject (bot) {
+     entity.pitch = conv.fromNotchianPitchByte(packet.pitch)
+     entity.headPitch = conv.fromNotchianPitchByte(packet.headPitch)
+ 
+-    const notchVel = new Vec3(packet.velocityX, packet.velocityY, packet.velocityZ)
++    // minecraft-data now represents the same three i16 fields as vec3i16.
++    const v = packet.velocity || { x: packet.velocityX, y: packet.velocityY, z: packet.velocityZ }
++    const notchVel = new Vec3(v.x, v.y, v.z)
+     entity.velocity.update(conv.fromNotchVelocity(notchVel))
+     entity.metadata = parseMetadata(packet.metadata, entity.metadata)
+ 
+@@ -281,7 +283,9 @@ function inject (bot) {
+   bot._client.on('entity_velocity', (packet) => {
+     // entity velocity
+     const entity = fetchEntity(packet.entityId)
+-    const notchVel = new Vec3(packet.velocityX, packet.velocityY, packet.velocityZ)
++    // New minecraft-data decoders group the wire coordinates into vec3i16.
++    const v = packet.velocity || { x: packet.velocityX, y: packet.velocityY, z: packet.velocityZ }
++    const notchVel = new Vec3(v.x, v.y, v.z)
+     entity.velocity.update(conv.fromNotchVelocity(notchVel))
+   })
+ 
+diff --git a/node_modules/mineflayer/lib/plugins/inventory.js b/node_modules/mineflayer/lib/plugins/inventory.js
+index 70db312..93d2054 100644
+--- a/node_modules/mineflayer/lib/plugins/inventory.js
++++ b/node_modules/mineflayer/lib/plugins/inventory.js
+@@ -125,10 +125,15 @@ function inject (bot, { hideErrors }) {
+         cursorZ: -1
+       })
+     } else if (bot.supportFeature('useItemWithOwnPacket')) {
++      const yawDeg = -bot.entity.yaw * 180 / Math.PI + 180 // invert + shift
++      const pitchDeg = -bot.entity.pitch * 180 / Math.PI // invert
+       bot._client.write('use_item', {
+         hand: offHand ? 1 : 0,
+         sequence,
+-        rotation: { x: 0, y: 0 }
++        rotation: {
++          x: yawDeg,
++          y: pitchDeg
++        }
+       })
+     }
+   }
+diff --git a/node_modules/mineflayer/lib/plugins/place_block.js b/node_modules/mineflayer/lib/plugins/place_block.js
+index fdaec6b..08983b6 100644
+--- a/node_modules/mineflayer/lib/plugins/place_block.js
++++ b/node_modules/mineflayer/lib/plugins/place_block.js
+@@ -11,7 +11,7 @@ function inject (bot) {
+     let newBlock = bot.blockAt(dest)
+     if (oldBlock.type === newBlock.type) {
+       [oldBlock, newBlock] = await onceWithCleanup(bot, `blockUpdate:${dest}`, {
+-        timeout: 5000,
++        timeout: 500,
+         // Condition to wait to receive block update actually changing the block type, in case the bot receives block updates with no changes
+         // oldBlock and newBlock will both be null when the world unloads
+         checkCondition: (oldBlock, newBlock) => !oldBlock || !newBlock || oldBlock.type !== newBlock.type

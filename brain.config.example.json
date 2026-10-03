@@ -1,0 +1,160 @@
+{
+  "version": 1,
+  "allowPaidFallback": false,
+  "quota": {
+    "sessionHours": 6,
+    "paceAcrossSession": true,
+    "normalBudgetPercent": 80,
+    "emergencyReservePercent": 20
+  },
+  "timeoutMs": 60000,
+  "maxOutputTokens": 1024,
+  "maxDecisionIntervalMs": 600000,
+  "configurationNote": "Numbers are example local safety caps, NOT verified account entitlements. Set limits from each provider account, then confirm limits and free-only access. Shared NVIDIA caps apply to all its models together.",
+  "providers": {
+    "google": {
+      "api": "gemini",
+      "url": "https://generativelanguage.googleapis.com/v1beta",
+      "keyEnv": "GEMINI_API_KEY",
+      "freeAccessConfirmed": false,
+      "limitsConfirmed": false,
+      "maxConcurrency": 1,
+      "paid": false,
+      "limits": {
+        "requestsPerMinute": 2,
+        "requestsPerHour": 100,
+        "requestsPerDay": 500,
+        "tokensPerMinute": 8000,
+        "tokensPerHour": 300000,
+        "tokensPerDay": 1000000,
+        "sessionRequests": 400,
+        "sessionTokens": 900000,
+        "minIntervalMs": 30000
+      }
+    },
+    "nvidia": {
+      "api": "openai",
+      "url": "https://integrate.api.nvidia.com/v1",
+      "keyEnv": "NVIDIA_API_KEY",
+      "freeAccessConfirmed": false,
+      "limitsConfirmed": false,
+      "maxConcurrency": 1,
+      "paid": false,
+      "limits": {
+        "requestsPerMinute": 2,
+        "requestsPerHour": 100,
+        "requestsPerDay": 500,
+        "tokensPerMinute": 8000,
+        "tokensPerHour": 300000,
+        "tokensPerDay": 1000000,
+        "sessionRequests": 400,
+        "sessionTokens": 900000,
+        "minIntervalMs": 30000
+      }
+    },
+    "cerebras": {
+      "api": "openai",
+      "url": "https://api.cerebras.ai/v1",
+      "keyEnv": "CEREBRAS_API_KEY",
+      "freeAccessConfirmed": false,
+      "limitsConfirmed": false,
+      "maxConcurrency": 1,
+      "paid": true,
+      "limits": {
+        "requestsPerMinute": 2,
+        "requestsPerHour": 100,
+        "requestsPerDay": 500,
+        "tokensPerMinute": 8000,
+        "tokensPerHour": 300000,
+        "tokensPerDay": 1000000,
+        "sessionRequests": 400,
+        "sessionTokens": 900000,
+        "minIntervalMs": 30000
+      }
+    },
+    "groq": {
+      "api": "openai",
+      "url": "https://api.groq.com/openai/v1",
+      "keyEnv": "GROQ_API_KEY",
+      "freeAccessConfirmed": false,
+      "limitsConfirmed": false,
+      "maxConcurrency": 1,
+      "paid": false,
+      "limits": {
+        "requestsPerMinute": 2,
+        "requestsPerHour": 100,
+        "requestsPerDay": 500,
+        "tokensPerMinute": 8000,
+        "tokensPerHour": 50000,
+        "tokensPerDay": 200000,
+        "sessionRequests": 400,
+        "sessionTokens": 180000,
+        "minIntervalMs": 30000
+      }
+    }
+  },
+  "brains": {
+    "gemini": {
+      "model": "gemini-3.1-flash-lite",
+      "routes": [
+        {
+          "provider": "google",
+          "model": "gemini-3.1-flash-lite",
+          "brain": "gemini-3.1-flash-lite",
+          "enabled": true,
+          "note": ""
+        }
+      ]
+    },
+    "deepseek": {
+      "model": "deepseek-v3.2",
+      "routes": [
+        {
+          "provider": "nvidia",
+          "model": "deepseek-ai/deepseek-v3.2",
+          "brain": "deepseek-v3.2",
+          "enabled": false,
+          "note": "NVIDIA currently marks this free endpoint deprecated. No free route verified; keep disabled until legitimate same-model access is confirmed."
+        }
+      ]
+    },
+    "gpt": {
+      "model": "gpt-oss-120b",
+      "routes": [
+        {
+          "provider": "nvidia",
+          "model": "openai/gpt-oss-120b",
+          "brain": "gpt-oss-120b",
+          "enabled": false,
+          "note": "NVIDIA currently marks this free endpoint deprecated."
+        },
+        {
+          "provider": "cerebras",
+          "model": "gpt-oss-120b",
+          "brain": "gpt-oss-120b",
+          "enabled": false,
+          "note": "Cerebras is currently a limited trial/paid service, not an always-free tier."
+        },
+        {
+          "provider": "groq",
+          "model": "openai/gpt-oss-120b",
+          "brain": "gpt-oss-120b",
+          "enabled": true,
+          "note": ""
+        }
+      ]
+    },
+    "nemotron": {
+      "model": "nemotron-3-super-120b-a12b",
+      "routes": [
+        {
+          "provider": "nvidia",
+          "model": "nvidia/nemotron-3-super-120b-a12b",
+          "brain": "nemotron-3-super-120b-a12b",
+          "enabled": true,
+          "note": ""
+        }
+      ]
+    }
+  }
+}

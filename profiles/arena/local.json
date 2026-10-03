@@ -1,0 +1,1 @@
+{ "name": "ARENA_LOCAL", "model": { "api": "ollama", "model": "sweaterdog/andy-4:micro-q8_0" }, "cooldown": 3000 }
