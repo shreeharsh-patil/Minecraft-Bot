@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
+<title id="title">Minecraft Bot — Build. Explore. Automate.</title>
+<desc id="desc">Animated pixel-art night landscape with four AI bot avatars, glowing interface, and drifting particles.</desc>
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#071310"/><stop offset=".55" stop-color="#10251b"/><stop offset="1" stop-color="#091b19"/></linearGradient>
+ <linearGradient id="grass" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#6bd76a"/><stop offset="1" stop-color="#a1f278"/></linearGradient>
+ <linearGradient id="shine" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ffffff" stop-opacity=".22"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>
+ <filter id="glow"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+ <pattern id="pixels" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#a5e8ba" stroke-opacity=".045"/></pattern>
+ <style>
+ @keyframes float {0%,100%{transform:translateY(0)}50%{transform:translateY(-11px)}}
+ @keyframes glowpulse {0%,100%{opacity:.58}50%{opacity:1}}
+ @keyframes slide {0%{transform:translateX(-330px);opacity:0}16%,85%{opacity:.6}100%{transform:translateX(1280px);opacity:0}}
+ @keyframes twinkle {0%,100%{opacity:.13}45%{opacity:.85}}
+ @keyframes blink {0%,44%,49%,100%{transform:scaleY(1)}46%{transform:scaleY(.12)}}
+ .bot1{animation:float 3.2s ease-in-out infinite}.bot2{animation:float 3.5s ease-in-out -1s infinite}.bot3{animation:float 4s ease-in-out -.5s infinite}.bot4{animation:float 3.8s ease-in-out -1.6s infinite}
+ .eyes{transform-box:fill-box;transform-origin:center;animation:blink 6s ease-in-out infinite}
+ .pulse{animation:glowpulse 3s ease-in-out infinite}
+ .scan{animation:slide 9s linear infinite}
+ .t1{animation:twinkle 3s -1s infinite}.t2{animation:twinkle 4s -2s infinite}.t3{animation:twinkle 2.8s -2.1s infinite}
+ .label{font:700 15px 'DejaVu Sans Mono',monospace;letter-spacing:4px;fill:#81b69a}
+ .title{font:900 64px system-ui,'Segoe UI',sans-serif;letter-spacing:1px;fill:#f2ffe9}
+ .subtitle{font:500 22px system-ui,'Segoe UI',sans-serif;fill:#b9d7c2}
+ .small{font:700 14px 'DejaVu Sans Mono',monospace;fill:#93e6a1;letter-spacing:1.6px}
+ </style>
+</defs>
+<rect width="1280" height="360" rx="22" fill="url(#bg)"/>
+<rect width="1280" height="360" rx="22" fill="url(#pixels)"/>
+<circle cx="1060" cy="100" r="125" fill="#60e29b" opacity=".075" filter="url(#glow)"/>
+<g fill="#9aeeb8"><rect class="t1" x="69" y="72" width="6" height="6"/><rect class="t2" x="138" y="220" width="4" height="4"/><rect class="t3" x="606" y="83" width="5" height="5"/><rect class="t1" x="721" y="40" width="4" height="4"/><rect class="t2" x="1200" y="214" width="6" height="6"/><rect class="t3" x="1155" y="52" width="4" height="4"/><rect class="t1" x="890" y="180" width="4" height="4"/></g>
+<g class="scan"><rect x="0" y="4" width="220" height="2" fill="#5ce99c" opacity=".25"/><rect x="0" y="346" width="220" height="2" fill="#5ce99c" opacity=".5"/></g>
+<path d="M0 292h160v-16h96v16h95v-12h96v12h102v-22h99v22h125v-12h118v12h289v68H0Z" fill="#122c20"/>
+<path d="M0 329h120v-14h120v14h116v-11h132v11h145v-15h128v15h519v31H0Z" fill="#193827"/>
+<path d="M0 329H1280" stroke="#5ab65f" stroke-width="6"/>
+<g opacity=".55"><rect x="40" y="336" width="42" height="24" fill="#326448"/><rect x="84" y="341" width="52" height="19" fill="#244c3a"/><rect x="672" y="339" width="43" height="21" fill="#326448"/><rect x="728" y="345" width="62" height="15" fill="#244c3a"/><rect x="1130" y="337" width="42" height="23" fill="#326448"/></g>
+<rect x="46" y="52" width="8" height="53" rx="4" fill="url(#grass)" class="pulse"/>
+<text x="75" y="69" class="label">YOUR WORLD. YOUR AGENTS.</text>
+<text x="75" y="153" class="title">MINECRAFT <tspan fill="#88ed93">BOT</tspan></text>
+<text x="75" y="195" class="subtitle">AI-powered adventures, one block at a time.</text>
+<g transform="translate(76 222)">
+ <rect width="208" height="42" rx="8" fill="#8bea96" opacity=".13" stroke="#80d98a" stroke-opacity=".55"/>
+ <circle cx="19" cy="21" r="5" fill="#91ed9d" class="pulse"/>
+ <text x="34" y="27" class="small">AUTONOMOUS AI</text>
+ <rect x="225" width="204" height="42" rx="8" fill="#8bea96" opacity=".09" stroke="#80d98a" stroke-opacity=".35"/>
+ <text x="240" y="27" class="small">MULTI-AGENT ARENA</text>
+</g>
+<g transform="translate(852 63)">
+ <rect x="-16" y="-19" width="360" height="244" rx="18" fill="#091a17" stroke="#4d9374" stroke-opacity=".6" stroke-width="2"/>
+ <rect x="0" y="0" width="328" height="36" rx="8" fill="#173429"/>
+ <circle cx="20" cy="18" r="5" fill="#92e79c"/><text x="35" y="23" font-family="monospace" font-size="14" fill="#bde7c3">AGENT CONTROL CENTER</text>
+ <g transform="translate(13 57)">
+  <g class="bot1"><rect width="69" height="69" rx="5" fill="#619d86"/><rect x="8" y="8" width="53" height="53" fill="#91c6a5"/><rect x="14" y="20" width="13" height="12" fill="#173e32" class="eyes"/><rect x="42" y="20" width="13" height="12" fill="#173e32" class="eyes"/><rect x="27" y="42" width="15" height="8" fill="#356957"/><rect x="0" y="0" width="69" height="7" fill="#b4e0b4" opacity=".55"/></g>
+  <g class="bot2" transform="translate(80 0)"><rect width="69" height="69" rx="5" fill="#386f85"/><rect x="8" y="8" width="53" height="53" fill="#77b2cf"/><rect x="14" y="20" width="13" height="12" fill="#163750" class="eyes"/><rect x="42" y="20" width="13" height="12" fill="#163750" class="eyes"/><rect x="27" y="42" width="15" height="8" fill="#346980"/><rect x="0" y="0" width="69" height="7" fill="#bee7ff" opacity=".45"/></g>
+  <g class="bot3" transform="translate(160 0)"><rect width="69" height="69" rx="5" fill="#9b7b57"/><rect x="8" y="8" width="53" height="53" fill="#e6bd80"/><rect x="14" y="20" width="13" height="12" fill="#5a432f" class="eyes"/><rect x="42" y="20" width="13" height="12" fill="#5a432f" class="eyes"/><rect x="27" y="42" width="15" height="8" fill="#946d40"/><rect x="0" y="0" width="69" height="7" fill="#f8dea6" opacity=".48"/></g>
+  <g class="bot4" transform="translate(240 0)"><rect width="69" height="69" rx="5" fill="#7c689d"/><rect x="8" y="8" width="53" height="53" fill="#bea6e7"/><rect x="14" y="20" width="13" height="12" fill="#4d356f" class="eyes"/><rect x="42" y="20" width="13" height="12" fill="#4d356f" class="eyes"/><rect x="27" y="42" width="15" height="8" fill="#6f5597"/><rect x="0" y="0" width="69" height="7" fill="#edddff" opacity=".48"/></g>
+ </g>
+ <g transform="translate(15 157)" font-family="monospace" font-size="14">
+  <text fill="#8baea0" x="0" y="0">WORLD CONNECTION</text><circle cx="281" cy="-5" r="5" fill="#83e99b" class="pulse"/>
+  <text fill="#e1ffdf" x="0" y="27">> explore / gather / craft</text>
+  <text fill="#84dc97" x="0" y="49">> agents synchronized_</text>
+ </g>
+</g>
+</svg>
