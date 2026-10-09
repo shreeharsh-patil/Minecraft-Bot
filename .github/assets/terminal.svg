@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="240" viewBox="0 0 900 240" role="img" aria-labelledby="a b">
+<title id="a">Minecraft Bot animated command preview</title><desc id="b">Illustrative terminal-style text highlighting bot actions; not a real recorded session.</desc>
+<style>
+ @keyframes reveal{0%{opacity:0;transform:translateY(8px)}12%,100%{opacity:1;transform:translateY(0)}}
+ @keyframes cursor{0%,49%{opacity:1}50%,100%{opacity:0}}
+ .line1{animation:reveal 7s both infinite}
+ .line2{animation:reveal 7s 1s both infinite}
+ .line3{animation:reveal 7s 2.2s both infinite}
+ .line4{animation:reveal 7s 3.5s both infinite}
+ .cursor{animation:cursor 1s steps(1,end) infinite}
+ .mono{font:18px 'DejaVu Sans Mono',Consolas,monospace}
+</style>
+<rect width="900" height="240" rx="15" fill="#0d1816"/><rect width="900" height="43" rx="15" fill="#1d342d"/><rect x="0" y="27" width="900" height="17" fill="#1d342d"/>
+<circle cx="27" cy="22" r="7" fill="#ed7268"/><circle cx="51" cy="22" r="7" fill="#eec067"/><circle cx="75" cy="22" r="7" fill="#79d895"/>
+<text x="450" y="28" text-anchor="middle" font-family="monospace" font-size="16" fill="#b9d2c5">minecraft-bot / preview</text>
+<g class="mono">
+<g class="line1"><text x="30" y="88" fill="#88dfa0">$ npm run arena:test-agent</text></g>
+<g class="line2"><text x="30" y="127" fill="#bdd0c2">[WORLD] <tspan fill="#eaf6eb">Connecting to Minecraft Java...</tspan></text></g>
+<g class="line3"><text x="30" y="166" fill="#a6bcfa">[AGENT] <tspan fill="#eaf6eb">Planning next action: explore and gather</tspan></text></g>
+<g class="line4"><text x="30" y="205" fill="#8ce6a2">[ARENA] <tspan fill="#eaf6eb">Dashboard available on localhost:8790</tspan><tspan class="cursor" fill="#9feb9f"> ▌</tspan></text></g>
+</g>
+</svg>
