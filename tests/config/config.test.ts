@@ -63,6 +63,8 @@ describe('buildConfig - happy path', () => {
     expect(config.safety.followDistance).toBe(3);
     expect(config.runtime.maxReconnectAttempts).toBe(5);
     expect(config.runtime.logFormat).toBe('pretty');
+    expect(config.minecraft.spawnTimeoutMs).toBe(60_000);
+    expect(config.warnings).toEqual([]);
   });
 
   it('uses the documented default model for each provider', () => {
@@ -86,6 +88,7 @@ describe('buildConfig - happy path', () => {
         FOLLOW_DISTANCE: '6',
         MAX_RECONNECT_ATTEMPTS: '0',
         LOG_FORMAT: 'json',
+        MC_SPAWN_TIMEOUT_MS: '120000',
       }),
     );
 
@@ -99,6 +102,7 @@ describe('buildConfig - happy path', () => {
     expect(config.safety.followDistance).toBe(6);
     expect(config.runtime.maxReconnectAttempts).toBe(0);
     expect(config.runtime.logFormat).toBe('json');
+    expect(config.minecraft.spawnTimeoutMs).toBe(120_000);
   });
 });
 describe('buildConfig - missing values', () => {
@@ -190,15 +194,18 @@ describe('buildConfig - AI provider selection', () => {
   });
 });
 describe('buildConfig - deliberate warnings and self-authorization', () => {
-  it('surfaces MC_AUTH=offline as an issue so it must be an explicit choice', () => {
-    const issues = issuesFor(defaultTestEnv({ MC_AUTH: 'offline' }));
+  it('surfaces MC_AUTH=offline as a warning, not a fatal issue, so cracked servers can start', () => {
+    const config = buildConfig(defaultTestEnv({ MC_AUTH: 'offline' }));
 
-    expect(issues).toHaveLength(1);
-    expect(issues[0]).toContain('MC_AUTH=offline');
-    expect(issues[0]).toContain('without Microsoft authentication');
+    expect(config.minecraft.auth).toBe('offline');
+    expect(config.warnings).toHaveLength(1);
+    expect(config.warnings[0]).toContain('MC_AUTH=offline');
+    expect(config.warnings[0]).toContain('without Microsoft authentication');
   });
 
-  it('does not warn for the default microsoft auth', () => {
+  it('has no warnings for the default microsoft auth', () => {
+    const config = buildConfig(defaultTestEnv());
+    expect(config.warnings).toHaveLength(0);
     expect(() => buildConfig(defaultTestEnv())).not.toThrow();
   });
 
@@ -228,6 +235,11 @@ describe('buildConfig - malformed numbers and booleans', () => {
   it('rejects an out-of-range MC_PORT', () => {
     const issues = issuesFor(defaultTestEnv({ MC_PORT: '0' }));
     expect(issues[0]).toContain('MC_PORT must be >= 1');
+  });
+
+  it('rejects a non-numeric or too-small MC_SPAWN_TIMEOUT_MS', () => {
+    expect(hasIssue(issuesFor(defaultTestEnv({ MC_SPAWN_TIMEOUT_MS: 'soon' })), 'MC_SPAWN_TIMEOUT_MS must be an integer')).toBe(true);
+    expect(hasIssue(issuesFor(defaultTestEnv({ MC_SPAWN_TIMEOUT_MS: '500' })), 'MC_SPAWN_TIMEOUT_MS must be >= 1000')).toBe(true);
   });
 
   it('rejects a non-numeric safety limit', () => {
