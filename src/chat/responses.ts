@@ -8,6 +8,7 @@ import type { ItemSummary } from '../types/world.js';
 import type { TaskRecord } from '../types/task.js';
 import type { ProviderStats } from '../types/provider.js';
 import { safeChatReply } from '../safety/chatInjectionGuard.js';
+import { COMMAND_SYNTAX } from './commandParser.js';
 import type { Logger } from '../utils/logger.js';
 
 /** Chat replies are sanitised and length-limited before sending. */
@@ -83,11 +84,28 @@ export class ChatResponder {
 
 // --- pure formatters -------------------------------------------------------
 
-export function formatHelp(prefix: string): string {
-  return [
-    `Commands: ${prefix}come, ${prefix}goto x y z, ${prefix}follow <player>, ${prefix}stop, `,
-    `${prefix}stay, ${prefix}guard <player>, ${prefix}inventory, ${prefix}status, ${prefix}help`,
-  ].join(' ');
+/**
+ * Packs the command list into as few chat lines as possible, each within
+ * `maxLength`. Derived from `COMMAND_SYNTAX`, so a newly added command can never
+ * be missing from help - and can never silently push the tail of the list past
+ * the chat line limit.
+ */
+export function formatHelp(prefix: string, maxLength = 190): string[] {
+  const lines: string[] = [];
+  let current = 'Commands:';
+  for (const command of COMMAND_SYNTAX) {
+    const entry = `${prefix}${command.usage}`;
+    const isFirst = current === 'Commands:';
+    const candidate = isFirst ? `${current} ${entry}` : `${current}, ${entry}`;
+    if (!isFirst && candidate.length > maxLength) {
+      lines.push(`${current}.`);
+      current = `Commands: ${entry}`;
+      continue;
+    }
+    current = candidate;
+  }
+  lines.push(`${current}.`);
+  return lines;
 }
 
 export function formatInventory(items: ItemSummary[], held: string | null): string {

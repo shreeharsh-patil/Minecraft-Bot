@@ -13,6 +13,7 @@ import { DANGEROUS_BLOCKS } from '../../../src/config/constants.js';
 import type {
   BlockRef,
   ChestRef,
+  DroppedItemRef,
   InventoryEntry,
   MinecraftFacade,
   MoveResult,
@@ -28,6 +29,8 @@ export interface FakeWorldInit {
   entities?: EntitySummary[];
   players?: PlayerSummary[];
   chests?: Array<{ at: BlockPos; items?: Record<string, number> }>;
+  /** Dropped stacks on the ground, as a death pile or a spill would leave. */
+  droppedItems?: Array<{ name: string; at: BlockPos }>;
   inventory?: Record<string, number>;
   /** blockName -> tool the facade should select, e.g. { oak_log: 'iron_axe' }. */
   tools?: Record<string, string>;
@@ -54,6 +57,9 @@ function key(p: Vec3Like): string {
   return `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`;
 }
 
+/** How close the bot must get before Minecraft hands it a dropped stack. */
+const PICKUP_RADIUS = 1;
+
 export class FakeMinecraftFacade implements MinecraftFacade {
   public readonly username = 'TestBot';
   public readonly dimension = 'overworld';
@@ -66,6 +72,8 @@ export class FakeMinecraftFacade implements MinecraftFacade {
   private readonly blocks = new Map<string, string>();
   private readonly inventoryMap = new Map<string, number>();
   private readonly chestMap = new Map<string, Map<string, number>>();
+  /** Dropped stacks keyed by position - mineflayer keeps one entity per stack. */
+  private readonly droppedMap = new Map<string, string>();
   private readonly entities: EntitySummary[];
   private readonly players: PlayerSummary[];
   private readonly tools: Record<string, string>;
@@ -82,6 +90,8 @@ export class FakeMinecraftFacade implements MinecraftFacade {
   public readonly equippedItems: string[] = [];
   public readonly chatMessages: string[] = [];
   public readonly dropped: Array<{ item: string; count: number }> = [];
+  /** Stacks the bot walked over and collected, i.e. what `pickup_items` gained. */
+  public readonly pickedUp: Array<{ item: string; count: number }> = [];
   public stopMovingCount = 0;
 
   // --- behaviour switches ------------------------------------------------
@@ -117,6 +127,7 @@ export class FakeMinecraftFacade implements MinecraftFacade {
     for (const chest of init.chests ?? []) {
       this.chestMap.set(key(chest.at), new Map(Object.entries(chest.items ?? {})));
     }
+    for (const dropped of init.droppedItems ?? []) this.droppedMap.set(key(dropped.at), dropped.name);
   }
 
   // --- test helpers -------------------------------------------------------
@@ -162,6 +173,25 @@ export class FakeMinecraftFacade implements MinecraftFacade {
   /** Chest contents, for assertions. */
   public chestContents(at: BlockPos): Record<string, number> {
     return Object.fromEntries(this.chestMap.get(key(at)) ?? new Map<string, number>());
+  }
+
+  /** Drops a stack on the ground, e.g. the aftermath of a player death. */
+  public addDroppedItem(name: string, at: BlockPos): void {
+    this.droppedMap.set(key(at), name);
+  }
+
+  public removeDroppedItem(at: BlockPos): void {
+    this.droppedMap.delete(key(at));
+  }
+
+  /** Positions of the stacks still lying on the ground, for assertions. */
+  public droppedItemPositions(): BlockPos[] {
+    const positions: BlockPos[] = [];
+    for (const droppedKey of this.droppedMap.keys()) {
+      const position = this.parseKey(droppedKey);
+      if (position !== null) positions.push(position);
+    }
+    return positions;
   }
 
   // --- state --------------------------------------------------------------
@@ -260,6 +290,19 @@ export class FakeMinecraftFacade implements MinecraftFacade {
     return best;
   }
 
+  public getNearbyDroppedItems(radius: number): DroppedItemRef[] {
+    this.calls.push('getNearbyDroppedItems');
+    const found: DroppedItemRef[] = [];
+    for (const [droppedKey, name] of this.droppedMap) {
+      const position = this.parseKey(droppedKey);
+      if (position === null) continue;
+      const distance = distance3(this.position, position);
+      if (distance > radius) continue;
+      found.push({ name, position, distance });
+    }
+    return found.sort((a, b) => a.distance - b.distance);
+  }
+
   private parseKey(blockKey: string): BlockPos | null {
     const parts = blockKey.split(',').map((n) => Number(n));
     const [x, y, z] = parts;
@@ -289,7 +332,23 @@ export class FakeMinecraftFacade implements MinecraftFacade {
     }
     this.position = { ...target };
     this.goal = { ...target };
+    // Minecraft hands a stack to a player who walks within a block of it, which
+    // is precisely the mechanic `pickup_items` relies on.
+    this.collectDroppedItems();
     return { status: 'arrived', distance: 0 };
+  }
+
+  /** Collects every stack now within pickup range, as the real game would. */
+  private collectDroppedItems(): void {
+    if (this.inventoryFull) return;
+    for (const [droppedKey, name] of [...this.droppedMap]) {
+      const position = this.parseKey(droppedKey);
+      if (position === null) continue;
+      if (distance3(this.position, position) > PICKUP_RADIUS) continue;
+      this.droppedMap.delete(droppedKey);
+      this.addItem(name, 1);
+      this.pickedUp.push({ item: name, count: 1 });
+    }
   }
 
   public async moveToPlayer(player: string, options?: NavigationOptions): Promise<MoveResult> {

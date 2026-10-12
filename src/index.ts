@@ -161,6 +161,7 @@ export class BotApp {
       responder,
       prefix: this.config.chat.prefix,
       providerStats: () => ai.stats().providers.length,
+      runAction: (owner, action) => this.runDeterministic(owner, action),
       logger: this.logger,
     });
 

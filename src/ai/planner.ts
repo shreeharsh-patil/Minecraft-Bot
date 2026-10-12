@@ -224,6 +224,18 @@ const VALIDATORS: Readonly<Record<ActionType, Validator>> = {
       ...note(raw),
     };
   },
+  pickup_items: (raw) => {
+    const item = readString(raw['item']);
+    const count = raw['count'] === undefined ? undefined : readCount(raw['count'], 1);
+    const radius = readNumber(raw['radius'], 1, LIMITS.radius);
+    return {
+      type: 'pickup_items',
+      ...(item !== undefined ? { item } : {}),
+      ...(count !== undefined ? { count } : {}),
+      ...(radius !== undefined ? { radius } : {}),
+      ...note(raw),
+    };
+  },
 place_block: (raw) => {
     const blockName = readString(raw['blockName']);
     const position = readPosition(raw['position']);
@@ -409,6 +421,7 @@ export function buildSystemPrompt(maxActions: number): string {
     '- equip_item / eat: item (optional for eat)',
     '- drop_item: item, optional count, optional where ("floor" | "chest")',
     '- deposit_items / withdraw_items: optional item, count, location',
+    '- pickup_items: optional item, optional count, optional radius',
     '- place_block: blockName, position {x,y,z}, optional face',
     '- build_structure: structure ("wall" | "platform" | "simple_house"), position, dimensions',
     '- attack_hostile: optional target, optional radius',

@@ -28,6 +28,7 @@ import { createDropItemSkill } from './inventory/dropItem.js';
 import { createEquipItemSkill } from './inventory/equipItem.js';
 import { createCollectResourceSkill } from './mining/collectResource.js';
 import { createMineBlockSkill } from './mining/mineBlock.js';
+import { createPickupItemsSkill } from './inventory/pickupItems.js';
 import { createFollowPlayerSkill } from './movement/followPlayer.js';
 import { createGotoPlayerSkill } from './movement/gotoPlayer.js';
 import { createGotoPositionSkill } from './movement/gotoPosition.js';
@@ -49,6 +50,7 @@ export function createSkillRegistry(facade: MinecraftFacade): SkillRegistry {
     createDropItemSkill(facade),
     createDepositItemsSkill(facade),
     createWithdrawItemsSkill(facade),
+    createPickupItemsSkill(facade),
     createAutoEatSkill(facade),
     createAttackHostileSkill(facade),
     createDefendSkill(facade),
@@ -102,6 +104,8 @@ export {
   transferOutOfChest,
 } from './inventory/chestManager.js';
 export { AutoEatSkill, createAutoEatSkill } from './survival/autoEat.js';
+export { PickupItemsSkill, createPickupItemsSkill } from './inventory/pickupItems.js';
+export type { PickupItemsParams } from './inventory/pickupItems.js';
 export { EscapeDangerSkill, createEscapeDangerSkill, detectDanger } from './survival/escapeDanger.js';
 export { DefendSkill, createDefendSkill } from './survival/defend.js';
 export { AttackHostileSkill, createAttackHostileSkill } from './combat/attackHostile.js';

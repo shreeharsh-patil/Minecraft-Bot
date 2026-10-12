@@ -4,7 +4,7 @@
  * These run with zero AI involvement. Each returns a short, deterministic
  * reply. Unknown/unsupported requests are reported plainly rather than guessed.
  */
-import type { ActionType } from '../types/actions.js';
+import type { ActionType, BotAction } from '../types/actions.js';
 import type { MinecraftFacade } from '../types/facade.js';
 import type { TaskManager } from '../executor/actionQueue.js';
 import type { AuthorizationService } from '../safety/permissions.js';
@@ -23,6 +23,8 @@ export interface LocalCommandDeps {
   responder: ChatResponder;
   prefix: string;
   providerStats: () => number;
+  /** Runs a validated action through the shared executor, as `!come` does. */
+  runAction: (owner: string, action: BotAction) => Promise<void>;
   logger: Logger;
 }
 
@@ -36,9 +38,13 @@ export class LocalCommands {
   async handle(owner: string, name: string, args: string[]): Promise<void> {
     const { responder } = this.deps;
     switch (name) {
-      case 'help':
-        await responder.send(owner, formatHelp(this.deps.prefix));
+      case 'help': {
+        // Sent as several bounded lines so the whole list always arrives.
+        for (const line of formatHelp(this.deps.prefix)) {
+          await responder.send(owner, line);
+        }
         return;
+      }
 
       case 'status':
         await this.status(owner);
@@ -72,6 +78,11 @@ export class LocalCommands {
           return;
         }
         await responder.send(owner, `Heading to home (${Math.round(location.position.x)}, ${Math.round(location.position.y)}, ${Math.round(location.position.z)}).`);
+        // Actually walk there, through the same executor every other action uses.
+        await this.deps.runAction(owner, {
+          type: 'move_to_position',
+          position: location.position,
+        });
         return;
       }
 

@@ -20,6 +20,7 @@ export const ACTION_TYPES = [
   'drop_item',
   'deposit_items',
   'withdraw_items',
+  'pickup_items',
   'eat',
   'attack_hostile',
   'defend_player',
@@ -115,6 +116,16 @@ export interface WithdrawItemsAction extends BaseAction {
   location?: string;
 }
 
+export interface PickupItemsAction extends BaseAction {
+  type: 'pickup_items';
+  /** Only collect this item (e.g. "iron_ingot"). Omit to collect anything. */
+  item?: string;
+  /** Stop after this many items. Omit to collect everything in range. */
+  count?: number;
+  /** Search radius in blocks. */
+  radius?: number;
+}
+
 /** Building --------------------------------------------------------------- */
 export interface PlaceBlockAction extends BaseAction {
   type: 'place_block';
@@ -171,6 +182,7 @@ export type BotAction =
   | DropItemAction
   | DepositItemsAction
   | WithdrawItemsAction
+  | PickupItemsAction
   | PlaceBlockAction
   | BuildStructureAction
   | EatAction

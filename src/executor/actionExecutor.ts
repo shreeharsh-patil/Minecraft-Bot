@@ -34,6 +34,8 @@ const ACTION_CONFLICT_GROUP: Record<ActionType, string> = {
   drop_item: CONFLICT_GROUP.INVENTORY,
   deposit_items: CONFLICT_GROUP.INVENTORY,
   withdraw_items: CONFLICT_GROUP.INVENTORY,
+  // Walking onto the dropped stacks needs the body, so it claims movement.
+  pickup_items: CONFLICT_GROUP.MOVEMENT,
   eat: CONFLICT_GROUP.NONE,
   attack_hostile: CONFLICT_GROUP.COMBAT,
   defend_player: CONFLICT_GROUP.COMBAT,

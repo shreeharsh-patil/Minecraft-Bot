@@ -29,6 +29,14 @@ export interface ChestRef {
   distance: number;
 }
 
+/** A dropped item entity lying on the ground, nearest first. */
+export interface DroppedItemRef {
+  /** Item name as the server reports it, e.g. "iron_ingot". */
+  name: string;
+  position: BlockPos;
+  distance: number;
+}
+
 export interface NavigationOptions {
   signal?: AbortSignal;
   /** Give up and report rather than pathing forever. */
@@ -73,6 +81,13 @@ export interface MinecraftFacade {
   getNearbyEntities(maxDistance: number): EntitySummary[];
   getNearestPlayer(name: string): PlayerSummary | null;
   findNearestChest(maxDistance: number): ChestRef | null;
+  /**
+   * Dropped item entities within `radius` blocks, nearest first.
+   *
+   * Used by `pickup_items`: the bot walks onto the items and Minecraft's own
+   * pickup mechanic collects them, so this only has to plan the walk.
+   */
+  getNearbyDroppedItems(radius: number): DroppedItemRef[];
 
   // --- movement ---------------------------------------------------------
   moveToPosition(target: Vec3Like, options?: NavigationOptions): Promise<MoveResult>;

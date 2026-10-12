@@ -176,31 +176,54 @@ export function toAction(name: string, args: string[]): BotAction | { error: str
       };
     }
 
+    case 'pickup': {
+      if (args[0] !== undefined && !isItem(args[0])) return { error: 'usage: !pickup [item] [count]' };
+      const item = args[0]?.toLowerCase();
+      const count = args[1] !== undefined ? parseCount(args[1], 2304) : null;
+      if (args[1] !== undefined && count === null) return { error: 'count must be a positive integer' };
+      return {
+        type: 'pickup_items',
+        ...(item !== undefined ? { item } : {}),
+        ...(count !== null ? { count } : {}),
+      };
+    }
+
     default:
       return { error: `unknown command "${name}"` };
   }
 }
 
+/**
+ * The single source of truth for the command surface: `name` routes the command
+ * and `usage` is what `!help` prints. Adding an entry here is enough - the
+ * parser set, the dispatcher and the help text all follow, so they cannot drift
+ * apart and no command can exist without being documented.
+ */
+export const COMMAND_SYNTAX: readonly { name: string; usage: string }[] = [
+  { name: 'come', usage: 'come' },
+  { name: 'goto', usage: 'goto <x> <y> <z>' },
+  { name: 'follow', usage: 'follow <player>' },
+  { name: 'guard', usage: 'guard <player>' },
+  { name: 'stop', usage: 'stop' },
+  { name: 'stay', usage: 'stay' },
+  { name: 'pickup', usage: 'pickup [item] [count]' },
+  { name: 'mine', usage: 'mine <block> [count]' },
+  { name: 'deposit', usage: 'deposit [item]' },
+  { name: 'withdraw', usage: 'withdraw [item] [count]' },
+  { name: 'equip', usage: 'equip <item>' },
+  { name: 'drop', usage: 'drop <item> [count]' },
+  { name: 'eat', usage: 'eat [item]' },
+  { name: 'inventory', usage: 'inventory' },
+  { name: 'status', usage: 'status' },
+  { name: 'remember', usage: 'remember <name>' },
+  { name: 'home', usage: 'home' },
+  { name: 'help', usage: 'help' },
+];
+
 /** Commands that never involve the AI and must respond instantly. */
-export const DETERMINISTIC_COMMANDS: ReadonlySet<string> = new Set([
-  'come',
-  'goto',
-  'follow',
-  'stay',
-  'stop',
-  'status',
-  'inventory',
-  'help',
-  'guard',
-  'eat',
-  'equip',
-  'drop',
-  'mine',
-  'deposit',
-  'withdraw',
-  'remember',
-  'home',
-]);
+export const DETERMINISTIC_COMMANDS: ReadonlySet<string> = new Set(
+  COMMAND_SYNTAX.map((command) => command.name),
+);
 
 /** Commands handled entirely inside the chat layer (no world action). */
 export const LOCAL_COMMANDS: ReadonlySet<string> = new Set([

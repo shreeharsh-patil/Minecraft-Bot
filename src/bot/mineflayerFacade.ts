@@ -16,6 +16,7 @@ import type {
   NavigationOptions,
   BlockRef,
   ChestRef,
+  DroppedItemRef,
   InventoryEntry,
 } from '../types/facade.js';
 import { MOVEMENT, DANGEROUS_BLOCKS, HOSTILE_MOB_FAMILIES } from '../config/constants.js';
@@ -50,6 +51,22 @@ function categorize(name: string): EntitySummary['type'] {
   if (HOSTILE_MOB_FAMILIES.has(name)) return 'hostile';
   if (PASSIVE.has(name)) return 'passive';
   return 'other';
+}
+
+/**
+ * The item inside a dropped-item entity.
+ *
+ * Item entities appear as soon as they are in range but their item metadata can
+ * arrive a tick later, so this never throws and reports `unknown` rather than
+ * breaking a whole world scan.
+ */
+function droppedItemName(entity: Entity): string {
+  try {
+    const dropped = entity.getDroppedItem();
+    return dropped && typeof dropped.name === 'string' ? dropped.name : 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 export class MineflayerFacade implements MinecraftFacade {
@@ -251,6 +268,26 @@ export class MineflayerFacade implements MinecraftFacade {
       position: { x: found.position.x, y: found.position.y, z: found.position.z },
       distance: distance3(this.getPosition(), found.position),
     };
+  }
+
+  getNearbyDroppedItems(radius: number): DroppedItemRef[] {
+    const out: DroppedItemRef[] = [];
+    const selfId = this.getEntityId();
+    const here = this.getPosition();
+    for (const entity of Object.values(this.bot.entities ?? {})) {
+      if (entity.id === selfId) continue;
+      // Mineflayer names object entities by their object type: "item" is a
+      // dropped stack, and only those can be picked up.
+      if (entity.name !== 'item' || !entity.position) continue;
+      const d = distance3(here, entity.position);
+      if (d > radius) continue;
+      out.push({
+        name: droppedItemName(entity),
+        position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+        distance: d,
+      });
+    }
+    return out.sort((a, b) => a.distance - b.distance);
   }
 
   getInventory(): InventoryEntry[] {

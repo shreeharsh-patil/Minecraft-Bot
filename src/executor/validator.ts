@@ -306,6 +306,28 @@ case 'deposit_items':
       };
     }
 
+    case 'pickup_items': {
+      const item = raw['item'];
+      if (item !== undefined && !isItemName(item)) {
+        return { valid: false, reason: 'pickup_items "item" must be a valid item name' };
+      }
+      const count = raw['count'] === undefined ? undefined : positiveInt(raw['count'], 2304);
+      if (raw['count'] !== undefined && count === undefined) {
+        return { valid: false, reason: 'pickup_items "count" must be a positive integer' };
+      }
+      const radius = optionalDistance(raw['radius'], 32);
+      return {
+        valid: true,
+        action: {
+          ...base,
+          type,
+          ...(item !== undefined ? { item } : {}),
+          ...(count !== undefined ? { count } : {}),
+          ...(radius !== undefined ? { radius } : {}),
+        },
+      };
+    }
+
     case 'eat': {
       const item = raw['item'];
       if (item !== undefined && !isItemName(item)) {
