@@ -1,0 +1,24 @@
+[Unit]
+Description=Native Minecraft companion supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=minecraft-companion
+Group=minecraft-companion
+WorkingDirectory=/opt/minecraft-companion
+EnvironmentFile=/opt/minecraft-companion/.env
+ExecStart=/opt/minecraft-companion/minecraft-companion --activation-file /opt/minecraft-companion/data/activation.json
+# Automatic process/server restarts are deliberately disabled.
+Restart=no
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/minecraft-companion/data
+
+[Install]
+WantedBy=multi-user.target

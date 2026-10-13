@@ -1,5 +1,7 @@
 # minecraft-ai-bot
 
+**Native Rust migration:** a separate Java 1.21.4/protocol 769 executable now lives in `native/`. Build with `cargo build --release --locked`; configure it using `.env.native.example`. Read the [native guide](native/README.md), [migration acceptance gates](docs/migration.md), [tests](docs/testing.md), and [deployment constraints](docs/deployment.md). The original implementation below is retained. Full feature parity and live-server validation are **not yet verified**.
+
 A Minecraft Java Edition companion bot for a small, owner-run server. It connects as a
 normal client with [mineflayer](https://github.com/PrismarineJS/mineflayer), listens to
 chat from a fixed allowlist of players, and turns their instructions into in-game actions.

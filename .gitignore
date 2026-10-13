@@ -4,14 +4,17 @@ node_modules/
 # Build output
 dist/
 
-# Docker
-Dockerfile
-.dockerignore
+# Rust build output
+target/
+artifacts/
+.test-server/
+benchmark-results/
 
 # Environment / secrets — NEVER commit these
 .env
 .env.*
 !.env.example
+!.env.native.example
 
 # Logs
 logs/

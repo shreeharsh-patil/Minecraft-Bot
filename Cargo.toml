@@ -1,0 +1,53 @@
+[package]
+name = "minecraft-companion"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "native/src/lib.rs"
+
+[[bin]]
+name = "minecraft-companion"
+path = "native/src/main.rs"
+
+[dependencies]
+azalea = { git = "https://github.com/azalea-rs/azalea", rev = "4fb6b077464e14f816e4c4fe54ff648e8c3d0ede", default-features = false }
+azalea-crypto = { git = "https://github.com/azalea-rs/azalea", rev = "4fb6b077464e14f816e4c4fe54ff648e8c3d0ede" }
+anyhow = "=1.0.95"
+async-trait = "=0.1.85"
+dotenvy = "=0.15.7"
+parking_lot = "=0.12.3"
+regex = "=1.11.1"
+rand = "=0.8.5"
+rsa = "=0.9.7"
+sha2 = { version = "=0.10.8", features = ["oid"] }
+reqwest = { version = "=0.12.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "=1.0.217", features = ["derive"] }
+serde_json = "=1.0.138"
+thiserror = "=2.0.11"
+tokio = { version = "=1.43.0", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs", "io-util", "io-std", "test-util"] }
+tokio-util = { version = "=0.7.13", features = ["rt"] }
+tracing = "=0.1.41"
+tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "json"] }
+uuid = { version = "=1.12.1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "=3.15.0"
+chrono = { version = "=0.4.39", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev.package.azalea-crypto]
+opt-level = 3
+[profile.dev.package.cfb8]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
