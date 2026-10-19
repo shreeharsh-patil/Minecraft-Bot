@@ -12,7 +12,7 @@ import { createLogger, type Logger } from './utils/logger.js';
 import { createBot, type ConnectedBot } from './bot/createBot.js';
 import { MineflayerFacade } from './bot/mineflayerFacade.js';
 import { HumanPresenceMonitor } from './bot/humanPresence.js';
-import { reconnect, policyFrom } from './bot/reconnect.js';
+import { reconnect, policyFrom, isFatalDisconnect } from './bot/reconnect.js';
 import { wireBotEvents } from './bot/events.js';
 import { AuthorizationService } from './safety/permissions.js';
 import { AntiGriefRules } from './safety/antiGrief.js';
@@ -48,6 +48,12 @@ export class BotApp {
   private ai: AIManager | null = null;
   private wiring: Wiring | null = null;
   private stopping = false;
+  /** True while a post-drop reconnect loop is running ('end' + 'kicked' both fire). */
+  private reconnecting = false;
+  /** Aborted by shutdown() so a pending reconnect sleep/attempt gives up at once. */
+  private readonly lifecycle = new AbortController();
+  /** Detach function for the current bot's event listeners. */
+  private detachEvents: (() => void) | null = null;
 
   private constructor(config: AppConfig, logger: Logger) {
     this.config = config;
@@ -69,6 +75,10 @@ export class BotApp {
       authorizedPlayers: config.authorizedPlayers.size,
       providers: config.ai.providers.map((p) => p.name),
     });
+    // Non-fatal advisories (e.g. MC_AUTH=offline) - visible, never fatal.
+    for (const warning of config.warnings) {
+      logger.warn('configuration warning', { warning });
+    }
     return new BotApp(config, logger);
   }
 
@@ -88,6 +98,7 @@ export class BotApp {
           this.config.runtime.reconnectBaseDelayMs,
         ),
         connect: () => this.connect(),
+        signal: this.lifecycle.signal,
       });
 
       if (outcome !== 'connected') {
@@ -178,7 +189,7 @@ export class BotApp {
       handleLocal: (owner, name, args) => local.handle(owner, name, args),
     });
 
-    wireBotEvents({
+    this.detachEvents = wireBotEvents({
       bot: connection.bot,
       logger: this.logger,
       onChat: (username, message) => {
@@ -318,11 +329,91 @@ export class BotApp {
     this.facade?.chat(safeChatReply(`${target}, ${message}`));
   }
 
+  /**
+   * Handles a live-connection loss.
+   *
+   * Aternos restarts, throttles and drops clients routinely, so a single drop
+   * must not kill the process: we tear down the dead session and run the same
+   * bounded reconnect loop used at startup. Unrecoverable kicks (whitelist,
+   * ban, auth) still stop immediately, and so does any drop that happens
+   * while we are already shutting down.
+   */
   private async onDisconnected(reason: string): Promise<void> {
     this.logger.warn('disconnected from server', { reason });
     this.presence?.noteDisconnected();
     if (this.stopping) return;
-    await this.shutdown('disconnected');
+
+    if (isFatalDisconnect(reason)) {
+      this.logger.error('fatal disconnect - not retrying', { reason });
+      await this.shutdown(`fatal disconnect: ${reason}`);
+      return;
+    }
+
+    // 'end' and 'kicked' both fire for one drop; only the first starts a loop.
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    this.logger.info('connection lost - attempting bounded reconnect', { reason });
+
+    try {
+      const oldAi = this.teardownSession(`disconnected: ${reason}`);
+      // Release the previous session's provider sockets before reconnecting.
+      await oldAi?.dispose().catch((error: unknown) => {
+        this.logger.warn('ai dispose failed during reconnect', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+
+      const outcome = await reconnect({
+        logger: this.logger.child({ component: 'reconnect' }),
+        policy: policyFrom(
+          this.config.runtime.maxReconnectAttempts,
+          this.config.runtime.reconnectBaseDelayMs,
+        ),
+        connect: () => this.connect(),
+        signal: this.lifecycle.signal,
+        onRetry: (attempt, delayMs) => {
+          this.logger.info('waiting before reconnect attempt', { attempt, delayMs });
+        },
+      });
+
+      if (outcome === 'connected') {
+        this.logger.info('reconnected after disconnect');
+        return;
+      }
+      if (outcome === 'aborted' || this.stopping) return; // shutdown won the race
+      this.logger.error('giving up after disconnect - reconnect attempts exhausted', { outcome });
+      // Non-zero so a supervisor (or plain `echo $?`) can tell this apart from
+      // an intentional stop (safe mode / SIGINT).
+      process.exitCode = 1;
+      await this.shutdown(`reconnect ${outcome}`);
+    } finally {
+      this.reconnecting = false;
+    }
+  }
+
+  /**
+   * Cancels all in-flight work and releases the current session's subsystems
+   * WITHOUT marking the app as stopping - used before a reconnect, where the
+   * next connect() will build fresh ones. Returns the detached AI manager so
+   * the caller can dispose() it (dispose must complete, so it stays async-free
+   * here and is handled by the caller).
+   */
+  private teardownSession(reason: string): AIManager | null {
+    this.detachEvents?.();
+    this.detachEvents = null;
+    this.presence?.stop();
+    this.presence = null;
+    this.stopEverything(reason);
+    this.tasks?.prune();
+    this.tasks = null;
+    this.wiring?.responder.clear();
+    this.wiring = null;
+    this.executor = null;
+    const ai = this.ai;
+    this.ai = null;
+    this.facade = null;
+    this.connection = null;
+    return ai;
   }
 
   /** Orderly shutdown: cancel work, stop timers, quit the client. */
@@ -330,15 +421,15 @@ export class BotApp {
     if (this.stopping) return;
     this.stopping = true;
     this.logger.info('shutting down', { reason });
+    // Unwind any pending reconnect sleep/attempt immediately.
+    this.lifecycle.abort();
 
-    this.presence?.stop();
-    this.stopEverything(reason);
-    this.tasks?.prune();
-    this.wiring?.responder.clear();
+    const connection = this.connection;
+    const ai = this.teardownSession(reason);
 
     // dispose() aborts in-flight AI requests, so it must complete.
     try {
-      await this.ai?.dispose();
+      await ai?.dispose();
     } catch (error) {
       this.logger.warn('ai dispose failed', {
         error: error instanceof Error ? error.message : String(error),
@@ -346,7 +437,7 @@ export class BotApp {
     }
 
     try {
-      this.connection?.bot.quit(reason);
+      connection?.bot.quit(reason);
     } catch (error) {
       this.logger.debug('quit failed', {
         error: error instanceof Error ? error.message : String(error),

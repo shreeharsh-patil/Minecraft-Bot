@@ -17,8 +17,11 @@ const FATAL_PATTERNS: readonly RegExp[] = [
   /authentication/i,
   /invalid session/i,
   /outdated server/i,
-  /multiplayer.*disconnect/i,
   /server is full/i,
+  // Deliberately NOT matched: "multiplayer.disconnect.server_shutdown" and
+  // friends. A server restart (normal on Aternos) must be retried, not treated
+  // as permanent. Only the explicit per-reason ban/whitelist/auth kicks above
+  // are considered unrecoverable.
 ];
 
 export interface ReconnectPolicy {

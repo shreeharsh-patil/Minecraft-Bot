@@ -16,6 +16,8 @@ export interface MinecraftConfig {
   auth: 'microsoft' | 'offline';
   version?: string;
   profilesPath?: string;
+  /** How long to wait for the first spawn before the connection attempt fails. */
+  spawnTimeoutMs: number;
 }
 
 export interface AiProviderConfig {
@@ -68,6 +70,8 @@ export interface AppConfig {
   presence: PresenceConfig;
   safety: SafetyConfig;
   runtime: RuntimeConfig;
+  /** Non-fatal notices surfaced at startup (e.g. MC_AUTH=offline). Logged, never thrown. */
+  warnings: readonly string[];
 }
 
 export class ConfigError extends Error {
@@ -175,6 +179,7 @@ const DEFAULT_MODEL: Record<ProviderName, string> = {
  */
 export function buildConfig(env: Env = process.env): AppConfig {
   const issues: string[] = [];
+  const warnings: string[] = [];
 
   const minecraft: MinecraftConfig = {
     host: req(env, 'MC_HOST', issues),
@@ -183,11 +188,14 @@ export function buildConfig(env: Env = process.env): AppConfig {
     auth: oneOf(env, 'MC_AUTH', ['microsoft', 'offline'] as const, 'microsoft', issues),
     ...(str(env, 'MC_VERSION') ? { version: str(env, 'MC_VERSION') } : {}),
     ...(str(env, 'MC_PROFILES_PATH') ? { profilesPath: str(env, 'MC_PROFILES_PATH') } : {}),
+    spawnTimeoutMs: int(env, 'MC_SPAWN_TIMEOUT_MS', 60_000, issues, 1_000),
   };
 
   if (minecraft.auth === 'offline') {
-    // Legitimate for offline-mode servers, but must be a deliberate choice.
-    issues.push(
+    // Legitimate for offline-mode servers (common on Aternos) but never a
+    // silent choice: the warning is logged loudly at startup instead of
+    // blocking the bot from starting at all.
+    warnings.push(
       'MC_AUTH=offline selected: the bot will connect without Microsoft authentication. ' +
         'Only use this for servers configured for offline mode.',
     );
@@ -283,7 +291,7 @@ export function buildConfig(env: Env = process.env): AppConfig {
 
   if (issues.length > 0) throw new ConfigError(issues);
 
-  return { minecraft, ai, authorizedPlayers: authLower, chat, presence, safety, runtime };
+  return { minecraft, ai, authorizedPlayers: authLower, chat, presence, safety, runtime, warnings };
 }
 
 /** Reads `.env` then validates. Called once from `src/index.ts`. */

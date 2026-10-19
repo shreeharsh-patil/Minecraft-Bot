@@ -11,8 +11,15 @@ import type { MinecraftConfig } from '../config/config.js';
 import type { Logger } from '../utils/logger.js';
 import { withTimeout } from '../utils/sleep.js';
 
-/** How long we wait for the initial spawn before declaring failure. */
+/** Default for callers that don't pass a config (tests, tooling). */
 const SPAWN_TIMEOUT_MS = 60_000;
+
+/**
+ * No-packet threshold before mineflayer declares the connection dead.
+ * Aternos free servers lag in bursts; the 30s library default (and even 60s)
+ * can be exceeded during a world save, so we are deliberately more patient.
+ */
+const KEEP_ALIVE_TIMEOUT_MS = 120_000;
 
 export interface ConnectedBot {
   bot: Bot;
@@ -46,7 +53,7 @@ export async function createBot(options: CreateBotOptions): Promise<ConnectedBot
     ...(config.profilesPath ? { profilesFolder: config.profilesPath } : {}),
     // The bot must never spam the server with chat.
     chatLengthLimit: 100,
-    checkTimeoutInterval: 60_000,
+    checkTimeoutInterval: KEEP_ALIVE_TIMEOUT_MS,
   });
 
   // The plugin is a static export and can be loaded immediately, but `Movements`
@@ -54,7 +61,23 @@ export async function createBot(options: CreateBotOptions): Promise<ConnectedBot
   // completed - so it must be constructed after spawn.
   bot.loadPlugin(pathfinder);
 
-  await waitForSpawn(bot, logger, options.spawnTimeoutMs ?? SPAWN_TIMEOUT_MS);
+  try {
+    await waitForSpawn(
+      bot,
+      logger,
+      options.spawnTimeoutMs ?? config.spawnTimeoutMs ?? SPAWN_TIMEOUT_MS,
+    );
+  } catch (error) {
+    // A failed spawn (timeout, kick, handshake error) can leave the TCP socket
+    // half-open. Repeated retries against a slow host would leak connections,
+    // so always tear the client down before surfacing the error.
+    try {
+      bot.quit('spawn failed');
+    } catch {
+      // The client may never have reached a quittable state; nothing to do.
+    }
+    throw error;
+  }
 
   const movements = new Movements(bot);
   movements.canDig = false; // Never punch through terrain to make progress.

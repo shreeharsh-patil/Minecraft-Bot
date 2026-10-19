@@ -69,6 +69,39 @@ least one provider API key. `.env` is gitignored (`.gitignore` lists `.env` and
 name, host and limit is read from the environment in `src/config/config.ts`. Startup
 validates the whole environment and reports every problem at once.
 
+## Aternos setup
+
+The bot connects as a plain Minecraft client, so an Aternos server needs no plugins
+or mods — only the `.env` values below. In the Aternos panel open **Options →
+Server properties** (and **Settings**) to check each item:
+
+| Aternos setting | What to put in `.env` |
+| --- | --- |
+| Address (`xyz.aternos.me`) | `MC_HOST=xyz.aternos.me`, keep `MC_PORT=25565` (the default port is what triggers the SRV lookup Aternos relies on) |
+| `online-mode=true` (default) | `MC_AUTH=microsoft` with an account that owns the game |
+| `online-mode=false` (cracked) | `MC_AUTH=offline` — startup logs a loud warning instead of failing, by design |
+| Whitelist enabled | Add `MC_USERNAME` to the Aternos whitelist, otherwise the kick is fatal and never retried |
+| Version / software (Vanilla, Paper, Fabric, Forge) | Leave `MC_VERSION=` empty — the bot auto-detects the version, so Aternos updates need no change |
+| Max players = 1 with the bot already in | The bot is a normal player: it occupies a slot while connected |
+
+Things to know about running on Aternos:
+
+- **Start the server first.** Aternos servers sleep when empty; if the bot starts
+  while the server is offline it retries with backoff (`MAX_RECONNECT_ATTEMPTS`,
+  default 5) and then exits with a clear error rather than looping forever.
+- **Restarts are retried, not fatal.** A vanilla `Server closed` /
+  `multiplayer.disconnect.server_shutdown` kick triggers the same bounded
+  reconnect loop, so the bot comes back after a routine Aternos restart. Only
+  unrecoverable kicks — whitelist, ban, authentication, outdated version — stop it.
+- **Aternos safe mode keeps you in control.** The bot never holds the server awake:
+  with `DISCONNECT_WITHOUT_HUMANS=true` (default) it leaves after
+  `HUMAN_TIMEOUT_SECONDS` (default 60) without an authorized player online.
+- **Free servers are slow.** If startup logs show `waiting for spawn` timeouts,
+  raise `MC_SPAWN_TIMEOUT_MS` (default 60000) to 90000–120000. The keep-alive
+  check is already relaxed to 120 s to survive world-save lag spikes.
+- **Bedrock is not supported.** Aternos Bedrock servers (port 19132) cannot be
+  joined by this bot; the server must be a Java Edition Aternos instance.
+
 ## AI configuration
 
 The bot ships adapters for four providers:
