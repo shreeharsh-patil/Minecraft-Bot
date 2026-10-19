@@ -41,9 +41,12 @@ executed. The bot is explicitly **not** an AFK/keep-alive tool — see
   `Dockerfile` targets.
 - A reachable **Minecraft Java Edition** server. `.env.example` ships an Aternos host as
   the example, but any Java Edition server the bot's account can join will work.
-- **At least one AI provider API key** (`GROQ_API_KEY`, `GEMINI_API_KEY`,
-  `OPENAI_API_KEY` or `OPENROUTER_API_KEY`). Startup fails with a `ConfigError` if no
-  configured provider has a key.
+- **No AI provider API keys are required.** With `AI_LOCAL_PLANNER=true` (the default)
+  the bot plans every request with its built-in algorithmic brain - pattern
+  matching, fuzzy-matched word tolerance, number words and world-grounded
+  targets. Optionally add keys (`GROQ_API_KEY`, `GEMINI_API_KEY`,
+  `OPENAI_API_KEY` or `OPENROUTER_API_KEY`) for a smarter LLM planner; any
+  detected key is used automatically and the rest is skipped.
 - A Microsoft account that owns (or can join) the server, for `MC_AUTH=microsoft`.
 
 ## Installation
@@ -104,7 +107,39 @@ Things to know about running on Aternos:
 
 ## AI configuration
 
+### Works with zero API keys (default)
+
+`AI_LOCAL_PLANNER=true` is the default, so the bot starts without any key and understands
+plain chat like a person would:
+
+```
+follow me          | folluw me          (typo tolerated)
+mine 20 logs       | mine twenty cobblestone | collect a few wood
+bring me 10 wood   | come here          | protect me
+hold the sword     | eat steak          | build a wall here
+what can you do?   | where are you?     | how many oak logs do you have?
+```
+
+The algorithmic planner: normalises the text (drops politeness, expands contractions,
+keeps number words like "twenty"), spots the verb, resolves quantities, then grounds the
+target against live world state (block names standing nearby, inventory contents, player
+names), emits the same closed-allowlist actions the LLM path produces, and answers
+questions from its own static Minecraft knowledge plus live world/context data (status,
+inventory, coordinates, time of day, nearby threats, how-to tips). It even has
+self-preservation: a hurt bot snacks before it works, and a hostile three blocks away
+gets attacked before anything else.
+
+If an API key IS present, the bot uses it instead: providers then handle everything
+above automatically. `AI_LOCAL_PLANNER=false` restores the old behaviour requiring a key.
+
 The bot ships adapters for four providers:
+
+| Provider | Endpoint | Default model |
+| --- | --- | --- |
+| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+| Gemini | `https://generativelanguage.googleapis.com/v1beta` | `gemini-2.5-flash` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4o-mini` |
 
 | Provider | Endpoint | Default model |
 | --- | --- | --- |

@@ -4,26 +4,8 @@
 
 /** Prefix that marks a deterministic (non-AI) command. Mirrors BOT_PREFIX. */
 export const DEFAULT_BOT_PREFIX = '!';
-
-/** Every action type the AI is permitted to emit. Nothing else is executable. */
-export const ACTION_TYPES = [
-  'move_to_player',
-  'move_to_position',
-  'follow_player',
-  'stop',
-  'mine_block',
-  'collect_resource',
-  'place_block',
-  'equip_item',
-  'drop_item',
-  'deposit_items',
-  'withdraw_items',
-  'eat',
-  'attack_hostile',
-  'defend_player',
-  'look_at',
-  'wait',
-] as const;
+// NOTE: the AI action allowlist lives in `src/types/actions.ts` (`ACTION_TYPES`).
+// Do not duplicate it here - there was an older copy that drifted stale.
 
 /**
  * Conflict groups. Only one task per group may hold the bot at a time,

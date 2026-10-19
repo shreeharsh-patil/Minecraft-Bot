@@ -67,6 +67,22 @@ function sanitizeNote(value: unknown): string | undefined {
   return trimmed.slice(0, 200);
 }
 
+/**
+ * Bounded chat text for `say` actions. Freer than an item name (sentences need
+ * spaces) but still bounded and injection-screened, so a chat message can never
+ * smuggle a command through what the bot "says".
+ */
+const SAY_MAX_CHARS = 200;
+
+function sanitizeChatText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  // eslint-disable-next-line no-control-regex -- stripping control chars is the point
+  const trimmed = value.replace(/[\u0000-\u001F\u007F]/g, '').trim();
+  if (trimmed.length === 0 || trimmed.length > SAY_MAX_CHARS) return undefined;
+  if (detectInjectedIntent(trimmed)) return undefined;
+  return trimmed;
+}
+
 function positiveInt(value: unknown, max: number): number | undefined {
   if (!isFiniteNumber(value)) return undefined;
   if (value <= 0) return undefined;
@@ -357,6 +373,14 @@ case 'deposit_items':
 
     case 'stop':
       return { valid: true, action: { ...base, type } };
+
+    case 'say': {
+      const message = sanitizeChatText(raw['message']);
+      if (message === undefined) {
+        return { valid: false, reason: 'say requires a bounded "message"' };
+      }
+      return { valid: true, action: { type, message, ...(note !== undefined ? { note } : {}) } };
+    }
 
     default:
       // Unreachable while ActionType and this switch are kept in sync.

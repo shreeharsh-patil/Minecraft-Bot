@@ -15,6 +15,7 @@ import type { Vec3Like } from '../types/world.js';
 import type { CompletionRequest, ProviderName, ProviderTier } from '../types/provider.js';
 import type { AIRouter, RoutedResult } from './router.js';
 import { extractJson } from './providers/BaseProvider.js';
+import { detectInjectedIntent } from '../safety/chatInjectionGuard.js';
 import type { CompactContext } from './contextBuilder.js';
 import { silentLogger } from '../utils/logger.js';
 import type { Logger } from '../utils/logger.js';
@@ -313,7 +314,18 @@ place_block: (raw) => {
     if (durationMs === undefined) return undefined;
     return { type: 'wait', durationMs, ...note(raw) };
   },
+  /** Chat lines: bounded, injection-screened, and never advertised to the
+   *  LLM in the system prompt - reserved for planner-composed answers. */
+  say: (raw) => {
+    const message = readString(raw['message'], SAY_MESSAGE_CHARS);
+    if (message === undefined) return undefined;
+    if (detectInjectedIntent(message)) return undefined;
+    return { type: 'say', message, ...note(raw) };
+  },
 };
+
+/** Upper bound for a single planner-composed chat line. */
+const SAY_MESSAGE_CHARS = 200;
 
 /** The model-supplied explanation, bounded so it cannot become a paragraph. */
 function note(raw: Record<string, unknown>): { note?: string } {

@@ -22,7 +22,8 @@ export interface LocalCommandDeps {
   memory: MemoryStore;
   responder: ChatResponder;
   prefix: string;
-  providerStats: () => number;
+  /** Human-readable "brain" description for `!status`. */
+  providerStats: () => string;
   /** Runs a validated action through the shared executor, as `!come` does. */
   runAction: (owner: string, action: BotAction) => Promise<void>;
   logger: Logger;
@@ -105,7 +106,7 @@ export class LocalCommands {
         dimension: facade.dimension,
         position: facade.getPosition(),
         activeTasks: tasks.list(),
-        providerCount: this.deps.providerStats(),
+        brain: this.deps.providerStats(),
       }),
     );
   }

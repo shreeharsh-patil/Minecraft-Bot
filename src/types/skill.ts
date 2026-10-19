@@ -96,3 +96,8 @@ export interface LookParams {
 export interface WaitParams {
   durationMs: number;
 }
+
+/** One bounded chat line. Text shape is enforced by the action validator. */
+export interface SayParams {
+  message: string;
+}

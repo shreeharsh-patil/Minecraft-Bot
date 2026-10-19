@@ -29,6 +29,8 @@ export interface AiProviderConfig {
 export interface AiConfig {
   /** Ordered by preference; unconfigured providers are dropped at load time. */
   providers: AiProviderConfig[];
+  /** True when the built-in algorithmic planner may stand in for the LLMs. */
+  localPlanner: boolean;
   requestTimeoutMs: number;
   /** Optional stronger model used for multi-step planning. */
   planningModel?: string;
@@ -234,11 +236,23 @@ export function buildConfig(env: Env = process.env): AppConfig {
     });
   }
 
-  if (providers.length === 0) {
+  /**
+   * The algorithmic planner keeps the bot useful with zero API keys. Default
+   * on: no excuse for a `ConfigError` when the bot can still plan locally.
+   */
+  const localPlanner = bool(env, 'AI_LOCAL_PLANNER', true, issues);
+
+  if (providers.length === 0 && !localPlanner) {
     issues.push(
       `No usable AI provider. Set at least one API key: ${
         priority.map((p) => AI_KEY_BY_PROVIDER[p]).join(', ') || '(none selected)'
-      }`,
+      }, or set AI_LOCAL_PLANNER=true to use the built-in algorithmic planner without keys.`,
+    );
+  }
+  if (providers.length === 0 && localPlanner) {
+    warnings.push(
+      'No AI provider API keys found - the built-in algorithmic planner will handle ' +
+        'chat requests entirely offline (AI_LOCAL_PLANNER=true by default).',
     );
   }
 
@@ -246,6 +260,7 @@ export function buildConfig(env: Env = process.env): AppConfig {
 
   const ai: AiConfig = {
     providers,
+    localPlanner,
     requestTimeoutMs: int(env, 'AI_REQUEST_TIMEOUT_MS', 20_000, issues, 500),
     ...(planningModel ? { planningModel } : {}),
     circuitFailureThreshold: int(env, 'AI_CIRCUIT_FAILURE_THRESHOLD', 3, issues, 1),

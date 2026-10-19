@@ -26,6 +26,7 @@ export const ACTION_TYPES = [
   'defend_player',
   'look_at',
   'wait',
+  'say',
 ] as const;
 
 export type ActionType = (typeof ACTION_TYPES)[number];
@@ -70,6 +71,17 @@ export interface LookAtAction extends BaseAction {
 export interface WaitAction extends BaseAction {
   type: 'wait';
   durationMs: number;
+}
+
+/**
+ * A single bounded chat line. Only produced for status answers, capability
+ * questions and refusals. The composer (planner/executor) builds the text from
+ * game data - a chat message can never inject a `say`, because the validator
+ * rejects injection patterns inside `message` and the executor rate-limits it.
+ */
+export interface SayAction extends BaseAction {
+  type: 'say';
+  message: string;
 }
 
 /** Mining / collection ---------------------------------------------------- */
@@ -176,6 +188,7 @@ export type BotAction =
   | StopAction
   | LookAtAction
   | WaitAction
+  | SayAction
   | MineBlockAction
   | CollectResourceAction
   | EquipItemAction

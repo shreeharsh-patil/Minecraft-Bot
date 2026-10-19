@@ -22,9 +22,15 @@ import { GeminiProvider } from './providers/GeminiProvider.js';
 import { GroqProvider } from './providers/GroqProvider.js';
 import { OpenAIProvider } from './providers/OpenAIProvider.js';
 import { OpenRouterProvider } from './providers/OpenRouterProvider.js';
+import { LocalPlanner } from './localPlanner.js';
 import { createDeferred } from '../utils/sleep.js';
 import { silentLogger } from '../utils/logger.js';
 import type { Logger } from '../utils/logger.js';
+
+/** Anything that can turn a `PlanRequest` into a `PlanResult`. */
+export interface PlannerLike {
+  plan(request: PlanRequest): Promise<PlanResult>;
+}
 
 export interface AIManagerOptions {
   config: AiConfig;
@@ -46,6 +52,8 @@ export interface AIManagerStats {
   /** Total requests rejected before reaching a provider. */
   rejected: number;
   providers: ProviderStats[];
+  /** 'local' = algorithmic planner with zero API keys. */
+  plannerMode: 'llm' | 'local';
 }
 
 interface QueueEntry {
@@ -78,7 +86,10 @@ function tierFor(name: AiProvider['name']): ProviderTier {
 
 export class AIManager {
   public readonly router: AIRouter;
-  public readonly planner: Planner;
+  /** The LLM planner or, with no keys configured, the algorithmic one. */
+  public readonly planner: PlannerLike;
+  /** How requests are planned: 'llm' with providers, 'local' without keys. */
+  public readonly plannerMode: 'llm' | 'local';
 
   private readonly logger: Logger;
   private readonly maxConcurrent: number;
@@ -114,17 +125,32 @@ export class AIManager {
     for (const provider of providers) {
       this.router.pool.register(provider, tierFor(provider.name));
     }
-    if (providers.length === 0) {
-      this.logger.warn('no AI providers configured; planning will always fail');
+    if (providers.length === 0 && config.localPlanner) {
+      this.plannerMode = 'local';
+      this.logger.warn(
+        'no AI provider API keys configured - the built-in algorithmic planner is handling requests offline',
+      );
+    } else {
+      this.plannerMode = 'llm';
+      if (providers.length === 0) {
+        this.logger.warn('no AI providers configured; planning will always fail');
+      }
     }
 
-    this.planner = new Planner({
-      router: this.router,
-      logger: this.logger,
-      ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-      ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
-      ...(options.maxActions !== undefined ? { maxActions: options.maxActions } : {}),
-    });
+    if (this.plannerMode === 'local') {
+      this.planner = new LocalPlanner({
+        logger: this.logger,
+        ...(options.maxActions !== undefined ? { maxActions: options.maxActions } : {}),
+      });
+    } else {
+      this.planner = new Planner({
+        router: this.router,
+        logger: this.logger,
+        ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+        ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
+        ...(options.maxActions !== undefined ? { maxActions: options.maxActions } : {}),
+      });
+    }
   }
 
   /**
@@ -189,7 +215,15 @@ export class AIManager {
       planned: this.planned,
       rejected: this.rejected,
       providers: this.router.pool.stats(),
+      plannerMode: this.plannerMode,
     };
+  }
+
+  /** Human-readable brain description for `!status`. */
+  public brainLabel(): string {
+    return this.plannerMode === 'local'
+      ? 'Brain: algorithmic planner (offline, no API keys).'
+      : `Brain: ${this.router.pool.stats().length} AI provider(s).`;
   }
 
   /** Releases provider sockets and cancels outstanding work. */

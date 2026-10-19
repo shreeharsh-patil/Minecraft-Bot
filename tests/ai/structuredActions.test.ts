@@ -442,6 +442,7 @@ function abortError(): Error {
 describe('AIManager facade', () => {
   const config: AiConfig = {
     providers: [{ name: 'groq', apiKey: 'test-key', model: 'test-model' }],
+    localPlanner: false,
     requestTimeoutMs: 2_000,
     circuitFailureThreshold: 2,
     circuitCooldownMs: 1_000,

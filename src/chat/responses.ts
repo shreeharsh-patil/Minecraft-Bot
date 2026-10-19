@@ -123,7 +123,8 @@ export function formatStatus(params: {
   dimension: string;
   position: { x: number; y: number; z: number };
   activeTasks: TaskRecord[];
-  providerCount: number;
+  /** Human-readable "brain" description from the AI manager. */
+  brain: string;
 }): string {
   const task =
     params.activeTasks.length === 0
@@ -135,7 +136,7 @@ export function formatStatus(params: {
   return (
     `HP ${Math.round(params.health)}/${params.maxHealth}, food ${Math.round(params.food)}, ` +
     `${params.dimension} at ${Math.round(params.position.x)},${Math.round(params.position.y)},` +
-    `${Math.round(params.position.z)}. ${task}. ${params.providerCount} AI provider(s) configured.`
+    `${Math.round(params.position.z)}. ${task}. ${params.brain}`
   );
 }
 

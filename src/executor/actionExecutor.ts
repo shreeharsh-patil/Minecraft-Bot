@@ -39,6 +39,8 @@ const ACTION_CONFLICT_GROUP: Record<ActionType, string> = {
   eat: CONFLICT_GROUP.NONE,
   attack_hostile: CONFLICT_GROUP.COMBAT,
   defend_player: CONFLICT_GROUP.COMBAT,
+  // Pure chat: no body access, never blocks another action.
+  say: CONFLICT_GROUP.NONE,
 };
 
 export interface ActionExecutorDeps {

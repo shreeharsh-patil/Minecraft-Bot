@@ -18,6 +18,7 @@ import type { MinecraftFacade } from '../types/facade.js';
 import type { Skill, SkillRegistry } from '../types/skill.js';
 
 import { createLookAtSkill } from './basic/lookAt.js';
+import { createSaySkill } from './basic/say.js';
 import { createStopSkill } from './basic/stop.js';
 import { createWaitSkill } from './basic/wait.js';
 import { createBuildStructureSkill } from './building/buildStructure.js';
@@ -56,6 +57,7 @@ export function createSkillRegistry(facade: MinecraftFacade): SkillRegistry {
     createDefendSkill(facade),
     createLookAtSkill(facade),
     createWaitSkill(facade),
+    createSaySkill(facade),
   ] as Array<Skill<never>>;
 
   const registry = new Map<ActionType, Skill<never>>();
@@ -110,6 +112,7 @@ export { EscapeDangerSkill, createEscapeDangerSkill, detectDanger } from './surv
 export { DefendSkill, createDefendSkill } from './survival/defend.js';
 export { AttackHostileSkill, createAttackHostileSkill } from './combat/attackHostile.js';
 export { StopSkill, createStopSkill } from './basic/stop.js';
+export { SaySkill, createSaySkill } from './basic/say.js';
 export { LookAtSkill, createLookAtSkill } from './basic/lookAt.js';
 export { WaitSkill, createWaitSkill } from './basic/wait.js';
 export { runMining, resolveResourceNames, MAX_BLOCKS_PER_TASK } from './mining/shared.js';

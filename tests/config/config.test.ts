@@ -107,12 +107,19 @@ describe('buildConfig - happy path', () => {
 });
 describe('buildConfig - missing values', () => {
   it('reports every problem in one error instead of failing one at a time', () => {
-    const issues = issuesFor({});
+    const issues = issuesFor({ MC_HOST: undefined, MC_USERNAME: undefined });
 
     expect(hasIssue(issues, 'MC_HOST is required')).toBe(true);
     expect(hasIssue(issues, 'MC_USERNAME is required')).toBe(true);
     expect(hasIssue(issues, 'AUTHORIZED_PLAYERS is required')).toBe(true);
-    expect(hasIssue(issues, 'No usable AI provider')).toBe(true);
+    // Zero API keys is no longer fatal: the algorithmic planner covers it.
+    expect(hasIssue(issues, 'No usable AI provider')).toBe(false);
+  });
+
+  it('with no keys and default AI_LOCAL_PLANNER=true, config still builds', () => {
+    const config = buildConfig({ MC_HOST: 'localhost', MC_PORT: '25565', MC_USERNAME: 'TestBot', AUTHORIZED_PLAYERS: 'Alice' });
+    expect(config.ai.localPlanner).toBe(true);
+    expect(config.ai.providers).toHaveLength(0);
   });
 
   it('formats the ConfigError message with every issue listed', () => {
@@ -141,15 +148,33 @@ describe('buildConfig - missing values', () => {
   });
 
   it('fails when the only selected AI provider has no key', () => {
-    const issues = issuesFor(defaultTestEnv({ GROQ_API_KEY: undefined }));
+    const issues = issuesFor(defaultTestEnv({ GROQ_API_KEY: undefined, AI_LOCAL_PLANNER: 'false' }));
     expect(hasIssue(issues, 'No usable AI provider')).toBe(true);
-    expect(hasIssue(issues, 'GROQ_API_KEY')).toBe(true);
+    expect(hasIssue(issues, 'AI_LOCAL_PLANNER')).toBe(true);
+  });
+
+  it('starts without any API key when AI_LOCAL_PLANNER stays enabled (default)', () => {
+    const config = buildConfig(defaultTestEnv({ GROQ_API_KEY: undefined }));
+    expect(config.ai.providers).toHaveLength(0);
+    expect(config.ai.localPlanner).toBe(true);
+    expect(config.warnings.some((w) => w.includes('algorithmic planner'))).toBe(true);
+  });
+
+  it('still requires a key when AI_LOCAL_PLANNER=false', () => {
+    expect(() => buildConfig(defaultTestEnv({ GROQ_API_KEY: undefined, AI_LOCAL_PLANNER: 'false' })))
+      .toThrow(ConfigError);
+  });
+
+  it('surfacing AI_LOCAL_PLANNER=false keeps the old fatal message', () => {
+    const issues = issuesFor(defaultTestEnv({ GROQ_API_KEY: undefined, AI_LOCAL_PLANNER: 'false' }));
+    expect(hasIssue(issues, 'No usable AI provider')).toBe(true);
   });
 
   it('fails when AI_PROVIDER_PRIORITY names no known provider', () => {
     const issues = issuesFor(defaultTestEnv({ AI_PROVIDER_PRIORITY: 'ollama,llama' }));
     expect(hasIssue(issues, 'AI_PROVIDER_PRIORITY must list at least one of')).toBe(true);
-    expect(hasIssue(issues, 'No usable AI provider')).toBe(true);
+    // With no providers left, the algorithmic planner still covers the bot.
+    expect(hasIssue(issues, 'No usable AI provider')).toBe(false);
   });
 });
 describe('buildConfig - AI provider selection', () => {
