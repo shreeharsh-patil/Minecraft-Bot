@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "dotenv": "^17.2.3",
+    "minecraft-data": "^3.117.0",
     "mineflayer": "^4.33.0",
     "mineflayer-pathfinder": "^2.4.5",
     "vec3": "^0.1.10"

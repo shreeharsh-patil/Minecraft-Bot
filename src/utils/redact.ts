@@ -110,7 +110,14 @@ export function scrubText(input: string): string {
  */
 export function scrubForChat(input: string): string {
   let out = scrubText(input);
-  out = out.replace(/(?:[A-Za-z]:\\|\/)(?:[\w .\\-]+[\\/])+[\w .\\-]*/g, '[path redacted]');
+  // A real path: a Windows drive ("C:\Users\me") or an absolute path
+  // ("/home/me/x"). A bare slash between words ("drop/stash/withdraw") is
+  // ordinary prose and must survive - redacting it mangled the bot's own
+  // capability list.
+  out = out.replace(/[A-Za-z]:\\(?:[\w.\\-]+[\\/])*[\w.\\-]*/g, '[path redacted]');
+  // The slash must START the path (not continue a word): "drop/stash" is
+  // prose, "/home/me" is a path.
+  out = out.replace(/(?<![\w])\/(?:[\w.-]+\/)+[\w.-]*/g, '[path redacted]');
   out = out.replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, 'host');
   return out;
 }

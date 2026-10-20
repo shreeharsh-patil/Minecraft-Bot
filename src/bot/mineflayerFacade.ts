@@ -32,6 +32,11 @@ function asVec3(point: Vec3Like): Vec3 {
   return new Vec3(point.x, point.y, point.z);
 }
 
+/** Stable key for a block position (used to remember the bot's own blocks). */
+function blockKey(position: BlockPos): string {
+  return `${Math.floor(position.x)},${Math.floor(position.y)},${Math.floor(position.z)}`;
+}
+
 /** Blocks with non-solid collision shapes. */
 const NON_SOLID = new Set([
   'air', 'cave_air', 'void_air', 'water', 'flowing_water', 'lava', 'flowing_lava',
@@ -74,6 +79,8 @@ export class MineflayerFacade implements MinecraftFacade {
   private readonly logger: Logger;
   /** The last position the bot was actually at (never the world origin). */
   private lastPosition: Vec3Like = { x: 0, y: 0, z: 0 };
+  /** Blocks the bot placed itself, so it never mines its own constructions. */
+  private readonly ownBlocks = new Set<string>();
 
   constructor(bot: MineflayerBot, logger: Logger) {
     this.bot = bot;
@@ -136,6 +143,17 @@ export class MineflayerFacade implements MinecraftFacade {
   getBlockAt(position: BlockPos): string | null {
     const block = this.bot.blockAt(asVec3(position));
     return block ? block.name : null;
+  }
+
+  /**
+   * True for blocks the bot placed itself.
+   *
+   * The bot remembers its own constructions so it never digs them up again:
+   * without this, "build a wall" followed by "mine 20 cobblestone" would
+   * demolish the wall the player just asked for.
+   */
+  isOwnBlock(position: BlockPos): boolean {
+    return this.ownBlocks.has(blockKey(position));
   }
 
   isDangerous(position: BlockPos): boolean {
@@ -487,6 +505,8 @@ export class MineflayerFacade implements MinecraftFacade {
       if (!block) return false;
       if (block.name === 'air' || block.name === 'cave_air') return false;
       await this.bot.dig(block, false);
+      // The block is gone: it is no longer the bot's own.
+      this.ownBlocks.delete(blockKey(position));
       return true;
     } catch (error) {
       this.logger.debug('dig failed', {
@@ -530,6 +550,8 @@ export class MineflayerFacade implements MinecraftFacade {
         const reference = this.bot.blockAt(asVec3(candidate.reference));
         if (!reference) continue;
         await this.bot.placeBlock(reference, candidate.face);
+        // Remember what the bot built, so it never mines it up again.
+        this.ownBlocks.add(blockKey(target));
         return true;
       }
       this.logger.debug('no reference block to place against', {

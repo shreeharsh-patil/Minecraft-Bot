@@ -9,6 +9,7 @@ import { pathfinder, Movements } from 'mineflayer-pathfinder';
 import type { Movements as MovementsType } from 'mineflayer-pathfinder';
 import type { MinecraftConfig } from '../config/config.js';
 import type { Logger } from '../utils/logger.js';
+import { checkMinecraftVersion } from './versionSupport.js';
 
 /** Default for callers that don't pass a config (tests, tooling). */
 const SPAWN_TIMEOUT_MS = 60_000;
@@ -39,6 +40,17 @@ export interface CreateBotOptions {
  */
 export async function createBot(options: CreateBotOptions): Promise<ConnectedBot> {
   const { config, logger } = options;
+
+  // Fail fast on a version the client library cannot speak: the alternative
+  // is a cryptic handshake error ("wrong version", "unsupported protocol").
+  const verdict = checkMinecraftVersion(config.version);
+  if (!verdict.supported) {
+    throw new Error(verdict.reason ?? `Minecraft ${config.version} is not supported.`);
+  }
+  logger.info('minecraft version', {
+    requested: config.version ?? 'auto-detect',
+    supported: `${verdict.oldestSupported} - ${verdict.newestSupported}`,
+  });
 
   const auth = config.auth;
   const bot = mineflayer.createBot({

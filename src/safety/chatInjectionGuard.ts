@@ -113,6 +113,9 @@ export function sanitizeChatMessage(raw: string, maxLength = 500): SanitizedChat
   // attributes (<img src=x onerror=...>) are stripped whole, not just their name.
   text = text.replace(/```/g, "'''").replace(/`/g, "'");
   text = text.replace(/<[^>]*>/g, ' ');
+  // Stripping markup can leave leading spaces ("<Alice> !status" -> " !status").
+  // A command prefix must be the FIRST character, so the text is trimmed.
+  text = text.trim();
 
   let sensitive = false;
   for (const pattern of SENSITIVE_REQUEST_PATTERNS) {

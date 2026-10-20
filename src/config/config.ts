@@ -212,6 +212,13 @@ export function buildConfig(env: Env = process.env): AppConfig {
       'MC_AUTH=offline selected: the bot will connect without Microsoft authentication. ' +
         'Only use this for servers configured for offline mode.',
     );
+    // Without a Microsoft session the bot cannot sign its chat, and a server
+    // with "enforce-secure-profile" (the default on many Vanilla and Fabric
+    // servers) rejects unsigned chat - the bot would connect but stay mute.
+    warnings.push(
+      'MC_AUTH=offline means the bot sends UNSIGNED chat: servers with ' +
+        'enforce-secure-profile=true will reject it. Use MC_AUTH=microsoft for those.',
+    );
   }
 
   const authorized = csv(env, 'AUTHORIZED_PLAYERS');

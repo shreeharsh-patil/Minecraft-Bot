@@ -173,6 +173,9 @@ function pickNextBlock(
     for (const candidate of facade.findBlocks(name, searchDistance, 16)) {
       if (tried.has(posKey(candidate.position))) continue;
       if (isDangerousBlock(candidate.name)) continue;
+      // Never mine the bot's own construction: "build a wall" followed by
+      // "mine 20 cobblestone" must not demolish the wall.
+      if (facade.isOwnBlock(candidate.position)) continue;
       if (best === null || candidate.distance < best.distance) best = candidate;
     }
   }

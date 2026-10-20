@@ -268,9 +268,12 @@ describe('buildConfig - deliberate warnings and self-authorization', () => {
     const config = buildConfig(defaultTestEnv({ MC_AUTH: 'offline' }));
 
     expect(config.minecraft.auth).toBe('offline');
-    expect(config.warnings).toHaveLength(1);
+    // Two warnings: the authentication mode, and the unsigned-chat caveat
+    // (a server with enforce-secure-profile rejects unsigned messages).
+    expect(config.warnings).toHaveLength(2);
     expect(config.warnings[0]).toContain('MC_AUTH=offline');
     expect(config.warnings[0]).toContain('without Microsoft authentication');
+    expect(config.warnings.join(' ')).toContain('UNSIGNED chat');
   });
 
   it('has no warnings for the default microsoft auth', () => {

@@ -105,6 +105,43 @@ Things to know about running on Aternos:
 - **Bedrock is not supported.** Aternos Bedrock servers (port 19132) cannot be
   joined by this bot; the server must be a Java Edition Aternos instance.
 
+## Server compatibility
+
+**Tested target: Minecraft 1.21.1, on both Vanilla and Fabric servers.**
+
+| | |
+| --- | --- |
+| Tested version | **1.21.1** |
+| Supported range | 1.8.8 up to the newest release the client library knows |
+| Server software | **Vanilla** and **Fabric** (and Paper/Spigot) - all work |
+| Client | Vanilla protocol client (`mineflayer`), no mods, no Fabric loader needed |
+
+Fabric servers work exactly like Vanilla ones: Fabric changes the **server**
+side only, the wire protocol is unchanged, so a plain vanilla client connects
+and behaves identically. Nothing about the bot is Fabric-specific.
+
+**Version selection.** Leave `MC_VERSION` empty and the bot auto-detects the
+server's version from the handshake - that is the recommended setting. Pin it
+to `MC_VERSION=1.21.1` when you want to be explicit. A version the client
+cannot speak is refused **before** a socket is opened, with a message naming
+the versions that do work, instead of a cryptic protocol error.
+
+**Chat signing (the one real gotcha).** Minecraft 1.19.1+ can require signed
+chat, and most modern servers - Vanilla and Fabric alike - leave
+`enforce-secure-profile=true`. Signed chat needs a real Microsoft session, so:
+
+- `MC_AUTH=microsoft` (recommended, works on online-mode servers): the bot
+  signs its chat and is accepted everywhere.
+- `MC_AUTH=offline` (cracked/offline-mode servers only): the bot sends
+  **unsigned** chat. It connects fine, but a server that enforces the secure
+  profile will **silently reject every message** - the bot looks mute.
+
+If the bot joins and never says anything, check the server's
+`enforce-secure-profile` setting before anything else.
+
+**Whitelist.** If the server has a whitelist, add the bot's gamertag to it -
+a whitelist kick is treated as fatal by design and is not retried.
+
 ## Deploy the bot on Render (bot in the cloud, server on Aternos)
 
 Render hosts the **bot process**; your Aternos instance stays the game server.

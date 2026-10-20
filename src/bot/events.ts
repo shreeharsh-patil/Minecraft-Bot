@@ -31,18 +31,20 @@ export interface WireOptions extends BotEventHandlers {
  * Narrow an unknown chat payload to the fields we need.
  *
  * mineflayer 4.35+ emits `message` as a prismarine-chat `ChatMessage` object
- * plus the sender name as a separate argument:
+ * plus a sender argument:
  *
  *   bot.emit('message', msg, 'chat', data.sender, verified)
  *
- * The old implementation read `username`/`message` off the payload, which
- * that object does not have - so EVERY chat line was dropped and the bot was
- * mute: no commands, no replies, not even `!stop`. Legacy servers still emit
- * a JSON string, so both shapes are handled.
+ * What `data.sender` contains depends on the protocol version: on 1.19+ the
+ * player_chat packet carries a UUID (the name is in the chat component and in
+ * the player list), on older servers it is the plain username. Reading the
+ * wrong thing makes the bot MUTE, because the UUID never matches
+ * AUTHORIZED_PLAYERS - so the name is resolved from several places.
  */
 function readChatFields(
   value: unknown,
   senderName?: unknown,
+  bot?: Bot,
 ): { username: string; message: string } | null {
   // Legacy shape: a JSON string with username/message.
   if (typeof value === 'string') {
@@ -64,14 +66,7 @@ function readChatFields(
   if (typeof value !== 'object' || value === null) return null;
   const record = value as Record<string, unknown>;
 
-  // The sender name arrives as its own argument; fall back to a field on the
-  // payload for older shapes.
-  const username =
-    typeof senderName === 'string' && senderName.length > 0
-      ? senderName
-      : typeof record['username'] === 'string'
-        ? record['username']
-        : undefined;
+  const username = resolveSenderName(value, senderName, bot);
   if (username === undefined) return null;
 
   // prismarine-chat exposes the plain text through toString(); some payloads
@@ -90,7 +85,67 @@ function readChatFields(
     }
   }
   if (text.length === 0) return null;
-  return { username, message: text };
+  return { username, message: stripSenderPrefix(text, username) };
+}
+
+/**
+ * Removes the sender prefix from a rendered chat line.
+ *
+ * The server sends the message as "<Alice> hello bot"; the listener wants the
+ * message itself. Leaving the prefix in place broke every `!` command on
+ * 1.19+ (the text no longer started with the prefix, so "!status" was treated
+ * as plain chat and handed to the planner).
+ */
+function stripSenderPrefix(text: string, username: string): string {
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith('<')) return trimmed;
+  const end = trimmed.indexOf('>');
+  if (end === -1) return trimmed;
+  const name = trimmed.slice(1, end);
+  if (name.toLowerCase() !== username.toLowerCase()) return trimmed;
+  return trimmed.slice(end + 1).trimStart();
+}
+
+/** True for a Minecraft UUID (dashed or undashed). */
+function looksLikeUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(value);
+}
+
+/**
+ * Finds the name of the player who sent a chat line.
+ *
+ * 1. The chat component of the message carries the name on modern versions.
+ * 2. The sender argument is a UUID on 1.19+: the player list maps it back.
+ * 3. On older servers the sender argument IS the name.
+ */
+function resolveSenderName(
+  payload: unknown,
+  senderName: unknown,
+  bot?: Bot,
+): string | undefined {
+  // 1. The sender component of the chat message ("Alice").
+  const chatSender = (payload as { sender?: { toString?: () => string } }).sender;
+  if (chatSender && typeof chatSender.toString === 'function') {
+    const name = chatSender.toString().replace(/^<|>$/g, '').trim();
+    if (name.length > 0 && !name.startsWith('{')) return name;
+  }
+
+  if (typeof senderName !== 'string' || senderName.length === 0) return undefined;
+
+  // 2. A UUID: look the name up in the player list the server sent us.
+  if (looksLikeUuid(senderName)) {
+    const map = (bot as { uuidToUsername?: Record<string, string> } | undefined)?.uuidToUsername;
+    if (map) {
+      const flat = senderName.replace(/-/g, '');
+      for (const [uuid, username] of Object.entries(map)) {
+        if (uuid.replace(/-/g, '') === flat) return username;
+      }
+    }
+    return undefined;
+  }
+
+  // 3. Legacy servers pass the username directly.
+  return senderName;
 }
 
 /**
@@ -104,7 +159,7 @@ export function wireBotEvents(options: WireOptions): () => void {
 
   const onMessage = (message: unknown, position: string, senderName?: unknown): void => {
     void position;
-    const fields = readChatFields(message, senderName);
+    const fields = readChatFields(message, senderName, bot);
     if (fields === null) return;
     try {
       options.onChat(fields.username, fields.message);

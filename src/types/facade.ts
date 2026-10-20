@@ -71,6 +71,14 @@ export interface MinecraftFacade {
 
   // --- world queries ----------------------------------------------------
   getBlockAt(position: BlockPos): string | null;
+  /**
+   * Is this block one the BOT placed itself?
+   *
+   * The bot must not dig up its own constructions: after "build a wall" a
+   * follow-up "mine 20 cobblestone" would otherwise demolish the wall the
+   * player just asked for.
+   */
+  isOwnBlock(position: BlockPos): boolean;
   /** Is this block safe to stand on / break? Wraps the danger rules. */
   isDangerous(position: BlockPos): boolean;
   findNearestBlock(name: string, maxDistance: number): BlockRef | null;
