@@ -16,7 +16,6 @@ mod verify_only {
     use rsa::RsaPrivateKey;
     use sha2::{Digest, Sha256};
     use tokio::signal;
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
     use uuid::Uuid;
 
     fn _rsa_compile_guard() {
@@ -39,7 +38,9 @@ mod verify_only {
     }
 
     async fn _signal_compile_guard() {
-        let _ = signal::ctrl_c();
+        // `drop` instead of `let _ = ...`: a non-binding let on a future is
+        // a clippy error, and this module is compiled with -D warnings.
+        drop(signal::ctrl_c());
     }
 
     fn _tracing_compile_guard() {
