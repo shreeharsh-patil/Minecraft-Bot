@@ -105,6 +105,67 @@ Things to know about running on Aternos:
 - **Bedrock is not supported.** Aternos Bedrock servers (port 19132) cannot be
   joined by this bot; the server must be a Java Edition Aternos instance.
 
+## Deploy the bot on Render (bot in the cloud, server on Aternos)
+
+Render hosts the **bot process**; your Aternos instance stays the game server.
+The repo ships a [`render.yaml`](render.yaml) blueprint, so the whole deploy is
+one click plus a few environment variables.
+
+1. Push the repo to GitHub (already done) and open **Render → New → Blueprint**,
+   pointing at `shreeharsh-patil/Minecraft-Bot`. Render reads `render.yaml`.
+2. Fill in the `sync: false` variables Render asks for:
+
+| Variable | Value | Notes |
+| --- | --- | --- |
+| `MC_HOST` | your Aternos address, e.g. `myserver.aternos.me` | the address from your Aternos panel |
+| `MC_PORT` | `25565` | leave as is - the default port is what triggers the SRV lookup Aternos relies on |
+| `MC_USERNAME` | your Microsoft account's gamertag | with `MC_AUTH=microsoft` the in-game name comes from the account |
+| `MC_AUTH` | `microsoft` | use `offline` only for cracked servers |
+| `AUTHORIZED_PLAYERS` | `shreeharsh` | comma separated; matching is case-insensitive |
+| `AI_LOCAL_PLANNER` | `true` | already the default - no AI key needed |
+| `LOG_FORMAT` | `json` | Render reads structured logs best this way |
+
+3. Start your Aternos server before the first deploy. A sleeping Aternos
+   instance refuses connections, and the bot's reconnect loop will keep retrying
+   until the server is up.
+
+### First login (Microsoft device code)
+
+The bot signs in with a Microsoft account and there is no browser on the server,
+so the **first** deploy asks for a device code:
+
+1. Open the Render logs and look for the Microsoft sign-in URL plus a code.
+2. Open that URL on any device (phone is fine), paste the code, sign in.
+3. The token is cached in `MC_PROFILES_PATH` (`/opt/render/project/src/.minecraft-auth`).
+
+Render's filesystem is ephemeral, so after a redeploy the bot asks for the code
+again unless you attach a **Render Disk** mounted at that path (a paid add-on).
+Without a disk this is a 30-second inconvenience, not a blocker.
+
+### Free tier: keep the bot awake
+
+Render's free tier suspends a web service that receives no traffic, and the bot
+is a TCP client, not a web app - so the bot runs a tiny health endpoint
+(`HEALTH_PORT`, defaulting to the port Render injects) that answers `200 ok`.
+To stop the free tier from sleeping it, ping the service every ~10 minutes with
+a free uptime service (UptimeRobot / cron-job.org) pointed at
+`https://<your-service>.onrender.com/`.
+
+For an always-on bot without pingers, use a paid **Background Worker** instead:
+change `type: web` to `type: worker` in `render.yaml` and drop `healthCheckPath`.
+A worker still needs `MC_HOST` and the rest of the variables above, but nothing
+HTTP-related.
+
+### Aternos notes for a cloud-hosted bot
+
+- **Whitelist:** if your Aternos panel has the whitelist enabled, add the bot's
+  gamertag to it, otherwise the join is rejected and treated as fatal.
+- **Safe mode:** `DISCONNECT_WITHOUT_HUMANS=true` (default) makes the bot leave
+  after 60 s without an authorized player online, so it never holds an Aternos
+  server awake on its own. Keep it on.
+- **Free servers are slow:** if the logs show `waiting for spawn` timeouts, raise
+  `MC_SPAWN_TIMEOUT_MS` to `90000`-`120000`.
+
 ## AI configuration
 
 ### Works with zero API keys (default)

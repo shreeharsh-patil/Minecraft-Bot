@@ -30,6 +30,7 @@ import type { MemoryStore } from './types/memory.js';
 import type { BotAction } from './types/actions.js';
 import { safeChatReply } from './safety/chatInjectionGuard.js';
 import { BOT_TIMING } from './config/constants.js';
+import { startHealthServer, type HealthServerHandle } from './healthServer.js';
 import { fileURLToPath } from 'node:url';
 
 interface Wiring {
@@ -54,10 +55,13 @@ export class BotApp {
   private readonly lifecycle = new AbortController();
   /** Detach function for the current bot's event listeners. */
   private detachEvents: (() => void) | null = null;
+  /** Platform keep-alive listener (Render etc.); auxiliary, never fatal. */
+  private readonly health: HealthServerHandle | null;
 
-  private constructor(config: AppConfig, logger: Logger) {
+  private constructor(config: AppConfig, logger: Logger, health: HealthServerHandle | null = null) {
     this.config = config;
     this.logger = logger;
+    this.health = health;
   }
 
   /** Builds an app from configuration. Throws ConfigError if invalid. */
@@ -79,7 +83,17 @@ export class BotApp {
     for (const warning of config.warnings) {
       logger.warn('configuration warning', { warning });
     }
-    return new BotApp(config, logger);
+    // Start the platform keep-alive listener before connecting so the host
+    // already sees an open port while the bot is still joining.
+    const health = config.runtime.healthPort === undefined
+      ? null
+      : await startHealthServer(config.runtime.healthPort, logger).catch((error: unknown) => {
+          logger.warn('health server could not start (bot continues without it)', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        });
+    return new BotApp(config, logger, health);
   }
 
   /** Connects and starts all subsystems. Retries are bounded, never infinite. */
@@ -440,6 +454,15 @@ export class BotApp {
       connection?.bot.quit(reason);
     } catch (error) {
       this.logger.debug('quit failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    // Release the keep-alive port last: the platform may still be probing it.
+    try {
+      await this.health?.close();
+    } catch (error) {
+      this.logger.debug('health server close failed', {
         error: error instanceof Error ? error.message : String(error),
       });
     }

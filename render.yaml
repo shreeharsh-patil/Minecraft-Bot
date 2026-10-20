@@ -1,0 +1,39 @@
+# Render blueprint: deploys the TypeScript bot from this GitHub repo.
+#
+# Why a web service (not a worker): Render's free tier only runs web services,
+# and this repo's Dockerfile builds the Rust companion instead of the Node bot.
+# The bot carries a tiny health endpoint (HEALTH_PORT, defaults to the injected
+# PORT) so the platform sees an open port through healthCheckPath.
+#
+# Fill the sync:false values in the Render dashboard after the first deploy.
+services:
+  - type: web
+    name: minecraft-bot
+    runtime: node
+    plan: free
+    autoDeploy: true
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: MC_HOST
+        sync: false
+      - key: MC_PORT
+        value: "25565"
+      - key: MC_AUTH
+        value: microsoft
+      - key: MC_USERNAME
+        sync: false
+      - key: MC_VERSION
+      - key: MC_PROFILES_PATH
+        value: /opt/render/project/src/.minecraft-auth
+      - key: AUTHORIZED_PLAYERS
+        sync: false
+      - key: AI_LOCAL_PLANNER
+        value: "true"
+      - key: LOG_LEVEL
+        value: info
+      - key: LOG_FORMAT
+        value: json

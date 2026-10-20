@@ -33,6 +33,28 @@ function hasIssue(issues: string[], fragment: string): boolean {
   return issues.some((issue) => issue.includes(fragment));
 }
 
+describe('buildConfig - platform health port', () => {
+  it('keeps no HTTP listener by default', () => {
+    const config = buildConfig(defaultTestEnv());
+    expect(config.runtime.healthPort).toBeUndefined();
+  });
+
+  it('HEALTH_PORT wins over the injected PORT', () => {
+    const config = buildConfig(defaultTestEnv({ HEALTH_PORT: '10000', PORT: '3000' }));
+    expect(config.runtime.healthPort).toBe(10_000);
+  });
+
+  it('falls back to the platform-injected PORT (Render convention)', () => {
+    const config = buildConfig(defaultTestEnv({ PORT: '10000' }));
+    expect(config.runtime.healthPort).toBe(10_000);
+  });
+
+  it('rejects nonsense ports', () => {
+    const issues = issuesFor(defaultTestEnv({ HEALTH_PORT: '70000' }));
+    expect(hasIssue(issues, 'HEALTH_PORT must be a port number')).toBe(true);
+  });
+});
+
 describe('buildConfig - happy path', () => {
   it('accepts defaultTestEnv()', () => {
     const config = buildConfig(defaultTestEnv());

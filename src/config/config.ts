@@ -60,6 +60,8 @@ export interface RuntimeConfig {
   logLevel: 'debug' | 'info' | 'warn' | 'error' | 'silent';
   logFormat: 'pretty' | 'json';
   memoryFile?: string;
+  /** Optional keep-alive HTTP port for platform hosts (see src/healthServer.ts). */
+  healthPort?: number;
   maxReconnectAttempts: number;
   reconnectBaseDelayMs: number;
 }
@@ -290,6 +292,19 @@ export function buildConfig(env: Env = process.env): AppConfig {
     followDistance: int(env, 'FOLLOW_DISTANCE', 3, issues, 1),
   };
 
+  // Platform keep-alive: Render (and similar hosts) inject `PORT` and expect
+  // an open HTTP port. HEALTH_PORT overrides the injected value explicitly.
+  const healthPortRaw = str(env, 'HEALTH_PORT') ?? str(env, 'PORT');
+  let healthPort: number | undefined;
+  if (healthPortRaw !== undefined) {
+    const parsed = Number.parseInt(healthPortRaw, 10);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 65535) {
+      issues.push(`HEALTH_PORT must be a port number between 1 and 65535 (got "${healthPortRaw}")`);
+    } else {
+      healthPort = parsed;
+    }
+  }
+
   const runtime: RuntimeConfig = {
     logLevel: oneOf(
       env,
@@ -300,6 +315,7 @@ export function buildConfig(env: Env = process.env): AppConfig {
     ),
     logFormat: oneOf(env, 'LOG_FORMAT', ['pretty', 'json'] as const, 'pretty', issues),
     ...(str(env, 'MEMORY_FILE') ? { memoryFile: str(env, 'MEMORY_FILE') } : {}),
+    ...(healthPort !== undefined ? { healthPort } : {}),
     maxReconnectAttempts: int(env, 'MAX_RECONNECT_ATTEMPTS', 5, issues, 0),
     reconnectBaseDelayMs: int(env, 'RECONNECT_BASE_DELAY_MS', 5_000, issues, 100),
   };
