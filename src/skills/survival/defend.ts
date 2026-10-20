@@ -82,9 +82,11 @@ export class DefendSkill implements Skill<DefendParams> {
         ticks += 1;
 
         // The escape reflex comes first: standing in lava outranks guarding.
+        // Only hazard blocks, though: the guard fights mobs, it does not flee
+        // from them.
         if (needsEscape(this.facade, ESCAPE_RADIUS)) {
           const escaped = await this.escape.execute(
-            { radius: ESCAPE_RADIUS, distance: ESCAPE_DISTANCE },
+            { radius: ESCAPE_RADIUS, distance: ESCAPE_DISTANCE, hazardsOnly: true },
             ctx,
           );
           if (!escaped.ok) {

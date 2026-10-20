@@ -186,6 +186,24 @@ describe('Anti-grief - building', () => {
     expect(result.count).toBe(3);
     expect(result.detail).toMatch(/skipped 1/i);
   });
+
+  it('does not ask for material it does not need', async () => {
+    const facade = new FakeMinecraftFacade({ inventory: { cobblestone: 2 } });
+    // Two of the four cells already hold the material.
+    facade.addBlock('cobblestone', { x: 0, y: 64, z: 0 });
+    facade.addBlock('cobblestone', { x: 1, y: 64, z: 0 });
+    const skill = new BuildStructureSkill(facade);
+    const test = createTestContext();
+
+    const result = await skill.execute(
+      { structure: 'platform', position: { x: 0, y: 64, z: 0 }, dimensions: { length: 2, width: 2 } },
+      test.ctx,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.count).toBe(2);
+    expect(facade.countItem('cobblestone')).toBe(0);
+  });
 });
 
 describe('Anti-grief - chests', () => {

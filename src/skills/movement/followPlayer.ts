@@ -111,7 +111,7 @@ export class FollowPlayerSkill implements Skill<FollowPlayerParams> {
         // The escape reflex comes first: standing in lava outranks following.
         if (needsEscape(this.facade, ESCAPE_RADIUS)) {
           const escaped = await this.escape.execute(
-            { radius: ESCAPE_RADIUS, distance: ESCAPE_DISTANCE },
+            { radius: ESCAPE_RADIUS, distance: ESCAPE_DISTANCE, hazardsOnly: true },
             ctx,
           );
           if (!escaped.ok) {

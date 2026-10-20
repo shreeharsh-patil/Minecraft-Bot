@@ -4,8 +4,7 @@
  *
  * There is no `escape_danger` action type, so this is deliberately NOT a
  * registry `Skill`: it is the shared "get out of trouble" routine that the
- * follow and defend skills call on every tick, and that the executor can
- * reach as a safety reflex.
+ * follow and defend skills call on every tick, before they do anything else.
  */
 import { HOSTILE_MOB_FAMILIES, MOVEMENT } from '../../config/constants.js';
 import type { BlockRef, MinecraftFacade } from '../../types/facade.js';
@@ -25,6 +24,13 @@ export interface EscapeDangerParams {
   distance?: number;
   /** How far to look for hazards. */
   radius?: number;
+  /**
+   * Only flee from hazard blocks, not from hostile mobs.
+   *
+   * The guard uses this: running away from the zombie it is supposed to fight
+   * would be worse than the zombie.
+   */
+  hazardsOnly?: boolean;
 }
 
 export interface DangerReport {
@@ -86,7 +92,8 @@ export class EscapeDangerSkill {
 
     if (ctx.signal.aborted) return { ok: false, detail: 'Cancelled before I moved.', count: 0 };
 
-    const { hazardousBlocks, hostiles } = detectDanger(this.facade, radius);
+    const { hazardousBlocks, hostiles: allHostiles } = detectDanger(this.facade, radius);
+    const hostiles = params.hazardsOnly === true ? [] : allHostiles;
     if (hazardousBlocks.length === 0 && hostiles.length === 0) {
       return { ok: true, detail: "Nothing dangerous nearby.", count: 0 };
     }

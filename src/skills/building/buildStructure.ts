@@ -166,13 +166,16 @@ export class BuildStructureSkill implements Skill<BuildStructureParams> {
       ctx.say(`Clamping the build to ${MAX_BUILD_BLOCKS} blocks.`);
     }
 
-    // Fail fast and clearly when the materials are not there.
+    // Fail fast and clearly when the materials are not there. Cells that
+    // already hold the material need none, so they are not counted.
+    const alreadyThere = plan.filter((target) => this.facade.getBlockAt(target) === material).length;
+    const needed = plan.length - alreadyThere;
     const available = this.facade.countItem(material);
-    if (available < plan.length) {
+    if (available < needed) {
       return failedResult(
-        `I need ${plan.length} ${material.replace(/_/g, ' ')} but I only have ${available}.`,
+        `I need ${needed} ${material.replace(/_/g, ' ')} but I only have ${available}.`,
         0,
-        plan.length,
+        needed,
       );
     }
 

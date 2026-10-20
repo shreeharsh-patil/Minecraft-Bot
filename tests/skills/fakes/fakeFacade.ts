@@ -73,6 +73,8 @@ export class FakeMinecraftFacade implements MinecraftFacade {
   public health: number;
   public readonly slots: number;
   private readonly blocks = new Map<string, string>();
+  /** Blocks the bot placed itself (never mined by the bot). */
+  private readonly ownBlocks = new Set<string>();
   private readonly inventoryMap = new Map<string, number>();
   private readonly chestMap = new Map<string, Map<string, number>>();
   /** Dropped stacks keyed by position - mineflayer keeps one entity per stack. */
@@ -238,6 +240,11 @@ export class FakeMinecraftFacade implements MinecraftFacade {
   public isDangerous(position: BlockPos): boolean {
     const name = this.getBlockAt(position);
     return name !== null && DANGEROUS_BLOCKS.has(name);
+  }
+
+  /** Blocks the bot placed itself (the fake mirrors the real facade). */
+  public isOwnBlock(position: BlockPos): boolean {
+    return this.ownBlocks.has(key(position));
   }
 
   public findNearestBlock(name: string, maxDistance: number): BlockRef | null {
@@ -435,6 +442,7 @@ export class FakeMinecraftFacade implements MinecraftFacade {
     if (have === 1) this.inventoryMap.delete(blockName);
     else this.inventoryMap.set(blockName, have - 1);
     this.blocks.set(key(position), blockName);
+    this.ownBlocks.add(key(position));
     this.placedPositions.push({ at: { ...position }, block: blockName });
     return Promise.resolve(true);
   }
