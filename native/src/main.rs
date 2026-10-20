@@ -8,17 +8,16 @@ mod verify_only {
     // Compile-time smoke checks for dependencies that are only used by the
     // native backend. They prevent us from accidentally removing an import
     // that the real client path relies on.
-    use azalea_crypto::keys::CryptoKeyStore;
+    //
+    // `azalea_crypto::keys` is deliberately NOT checked here: it only exists
+    // in newer azalea-crypto revisions than the one this crate pins, and the
+    // real client path does not use it.
     use parking_lot::Mutex;
     use rsa::RsaPrivateKey;
     use sha2::{Digest, Sha256};
     use tokio::signal;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
     use uuid::Uuid;
-
-    fn _crypto_key_store_compile_guard() {
-        let _store: CryptoKeyStore = CryptoKeyStore::new();
-    }
 
     fn _rsa_compile_guard() {
         let key = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).expect("smoke");
@@ -49,7 +48,6 @@ mod verify_only {
 
     #[tokio::test(flavor = "current_thread")]
     async fn smoke_links_compile() {
-        _crypto_key_store_compile_guard();
         _rsa_compile_guard();
         _sha2_compile_guard();
         _uuid_compile_guard();
