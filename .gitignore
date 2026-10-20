@@ -41,6 +41,13 @@ Thumbs.db
 data/
 *.local.json
 
+# The generated item properties are a BUILD INPUT: the Rust test embeds the
+# JSON at compile time, so it has to be tracked like its generated Rust twin
+# (native/src/item_defaults.rs). Everything else under native/data stays out.
+!native/data/
+native/data/*
+!native/data/items-*.json
+
 # Test output
 coverage/
 test-out.txt
