@@ -92,10 +92,12 @@ pub fn parse(message: &str, prefix: &str, requester: &str) -> Result<Input, Stri
         }
         "follow" => Action::FollowPlayer {
             player: p(true)?,
+            // Legacy parity: a non-positive distance is dropped rather than trusted.
             distance: args
                 .get(1)
                 .map(|s| integer(s).map(|n| n as f32))
-                .transpose()?,
+                .transpose()?
+                .filter(|d| *d > 0.),
         },
         "guard" => Action::DefendPlayer {
             player: p(false)?,

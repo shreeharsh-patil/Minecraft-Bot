@@ -434,6 +434,36 @@ pub fn build_plan(
     out
 }
 
+/// Legacy parity: locate a balanced JSON object/array embedded in prose.
+/// Mirrors the TypeScript `extractBalancedJson` behaviour so a plan wrapped in
+/// commentary still parses, while everything outside the envelope is ignored
+/// (and can never execute).
+fn extract_balanced_json(raw: &str) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    let start = bytes.iter().position(|b| matches!(b, b'{' | b'['))?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, b) in bytes.iter().enumerate().skip(start) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match b {
+            b'\\' if in_string => escaped = true,
+            b'"' => in_string = !in_string,
+            b'{' | b'[' if !in_string => depth += 1,
+            b'}' | b']' if !in_string => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return raw.get(start..=i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
 pub fn parse_plan(raw: &str, max_mine: u32, max_build: u32) -> Result<Vec<Action>, String> {
     if raw.len() > 65_536 {
         return Err("AI response too large".into());
@@ -446,8 +476,13 @@ pub fn parse_plan(raw: &str, max_mine: u32, max_build: u32) -> Result<Vec<Action
         .trim()
         .trim_end_matches("```")
         .trim();
-    let value: serde_json::Value =
-        serde_json::from_str(trimmed).map_err(|_| "AI returned invalid JSON")?;
+    let value: serde_json::Value = serde_json::from_str(trimmed)
+        .or_else(|_| {
+            extract_balanced_json(trimmed)
+                .ok_or(())
+                .and_then(|slice| serde_json::from_str(slice).map_err(|_| ()))
+        })
+        .map_err(|_| "AI returned invalid JSON")?;
     let items = value
         .as_array()
         .or_else(|| value.get("actions").and_then(|v| v.as_array()))

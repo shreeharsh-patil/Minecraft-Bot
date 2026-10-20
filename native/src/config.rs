@@ -142,13 +142,25 @@ impl Config {
                 );
             }
         }
+        // Legacy semantics: normalise casing/whitespace, ignore unknown names,
+        // but refuse a priority that names no known provider at all.
         let priority = get("AI_PROVIDER_PRIORITY").unwrap_or("groq,gemini,openai,openrouter");
+        let requested: Vec<String> = priority
+            .split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        const KNOWN: [&str; 4] = ["groq", "gemini", "openai", "openrouter"];
+        if requested.iter().all(|n| !KNOWN.contains(&n.as_str())) {
+            return Err("AI_PROVIDER_PRIORITY must list at least one known provider".into());
+        }
         let mut providers = Vec::new();
         let mut seen = HashSet::new();
-        for name in priority.split(',').map(str::trim) {
-            if !["groq", "gemini", "openai", "openrouter"].contains(&name) {
-                return Err("invalid AI_PROVIDER_PRIORITY".into());
+        for name in &requested {
+            if !KNOWN.contains(&name.as_str()) {
+                continue;
             }
+            let name = name.as_str();
             if !seen.insert(name) {
                 continue;
             }
