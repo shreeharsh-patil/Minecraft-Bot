@@ -9,6 +9,7 @@ import type { MineParams, Skill, SkillResult } from '../../types/skill.js';
 import type { ActionType } from '../../types/actions.js';
 import { CONFLICT_GROUP } from '../../types/task.js';
 import type { ExecutionContext } from '../../types/task.js';
+import { AntiGriefRules } from '../../safety/antiGrief.js';
 import { describeError, failedResult, isCancellation, normaliseBlockName } from '../internal/helpers.js';
 import { humaniseBlockName, MAX_BLOCKS_PER_TASK, runMining } from './shared.js';
 
@@ -16,7 +17,10 @@ export class MineBlockSkill implements Skill<MineParams> {
   public readonly name: ActionType = 'mine_block';
   public readonly conflictGroups: readonly string[] = [CONFLICT_GROUP.MINING];
 
-  constructor(private readonly facade: MinecraftFacade) {}
+  constructor(
+    private readonly facade: MinecraftFacade,
+    private readonly rules: AntiGriefRules = new AntiGriefRules(),
+  ) {}
 
   public async execute(params: MineParams, ctx: ExecutionContext): Promise<SkillResult> {
     const blockName = normaliseBlockName(params.blockName ?? '');
@@ -33,7 +37,12 @@ export class MineBlockSkill implements Skill<MineParams> {
     const label = humaniseBlockName(blockName);
 
     try {
-      const run = await runMining(this.facade, ctx, { names: [blockName], count: target, label });
+      const run = await runMining(this.facade, ctx, {
+        names: [blockName],
+        count: target,
+        label,
+        rules: this.rules,
+      });
 
       if (run.cancelled) {
         return {
@@ -61,6 +70,6 @@ export class MineBlockSkill implements Skill<MineParams> {
   }
 }
 
-export function createMineBlockSkill(facade: MinecraftFacade): MineBlockSkill {
-  return new MineBlockSkill(facade);
+export function createMineBlockSkill(facade: MinecraftFacade, rules?: AntiGriefRules): MineBlockSkill {
+  return new MineBlockSkill(facade, rules);
 }

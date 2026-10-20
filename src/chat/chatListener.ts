@@ -2,13 +2,16 @@
  * Chat listener and command dispatcher.
  *
  * Command priority (highest first):
- *   1. `!stop`             - cancels everything instantly, always honoured
- *   2. deterministic `!`   - parsed locally, never touches an LLM
- *   3. natural language    - routed to the AI planner
- *   4. plain chat          - conversational context only, never executable
+ *   1. `!stop`              - cancels everything instantly, always honoured
+ *   2. deterministic `!`    - parsed locally, never touches an LLM
+ *   3. unknown/malformed `!` - answered locally, never reaches the planner
+ *   4. natural language     - routed to the AI planner
+ *   5. plain chat           - routed to the AI planner as well, so it can
+ *                              end up as a real action
  *
- * Everything is gated on authorization: an unlisted player chatting nearby is
- * remembered as context but their text can never become an instruction.
+ * Everything is gated on authorization: only an authorized player ever
+ * reaches the planner. Chat from an unlisted player is ignored outright, so
+ * it can never become an instruction.
  */
 import type { BotAction } from '../types/actions.js';
 import type { MinecraftFacade } from '../types/facade.js';
@@ -34,6 +37,7 @@ export type ChatRoute =
   | { kind: 'stop'; reason: string }
   | { kind: 'deterministic'; action: BotAction }
   | { kind: 'local'; name: string; args: string[] }
+  | { kind: 'usage'; message: string }
   | { kind: 'ai'; text: string }
   | { kind: 'ignored'; reason: string };
 
@@ -52,6 +56,16 @@ export interface ChatListenerDeps {
   stopEverything: (reason: string) => void;
   /** Handles local commands that need memory/status (help, remember, home...). */
   handleLocal: (owner: string, name: string, args: string[]) => Promise<void>;
+}
+
+/**
+ * Turns a parser error into a chat-friendly usage line: the parser reports
+ * errors in lower case ("usage: !goto <x> <y> <z>"), the player reads a
+ * sentence.
+ */
+function usageReply(error: string): string {
+  const first = error.charAt(0);
+  return first === '' ? error : `${first.toUpperCase()}${error.slice(1)}`;
 }
 
 export class ChatListener {
@@ -98,14 +112,17 @@ export class ChatListener {
       if (DETERMINISTIC_COMMANDS.has(name)) {
         const converted = toAction(name, args);
         if ('error' in converted) {
-          // A malformed deterministic command falls back to the AI so the
-          // player still gets help rather than silence.
+          // A malformed deterministic command is a usage error, not a task
+          // for the planner: a typo such as `!goto 1 2` must never turn
+          // into a world action.
           this.logger.debug('deterministic parse failed', { name, error: converted.error });
-          return { kind: 'ai', text: message.message };
+          return { kind: 'usage', message: usageReply(converted.error) };
         }
         return { kind: 'deterministic', action: converted };
       }
-      return { kind: 'ai', text: message.message };
+      // An unknown command name is answered by the local handler ("Unknown
+      // command: X"), never handed to the planner as if it were a request.
+      return { kind: 'local', name, args };
     }
 
     return { kind: 'ai', text: parsed.text };
@@ -142,6 +159,11 @@ export class ChatListener {
 
         case 'local':
           await this.deps.handleLocal(message.username, decision.name, decision.args);
+          return;
+
+        case 'usage':
+          // A plain usage error - no action, no planner, no world access.
+          await this.deps.responder.send(message.username, decision.message);
           return;
 
         case 'deterministic':

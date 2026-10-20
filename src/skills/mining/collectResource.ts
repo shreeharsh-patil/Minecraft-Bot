@@ -9,14 +9,21 @@ import type { CollectParams, Skill, SkillResult } from '../../types/skill.js';
 import type { ActionType } from '../../types/actions.js';
 import { CONFLICT_GROUP } from '../../types/task.js';
 import type { ExecutionContext } from '../../types/task.js';
+import { AntiGriefRules } from '../../safety/antiGrief.js';
 import { describeError, failedResult, isCancellation, normaliseBlockName } from '../internal/helpers.js';
 import { MAX_BLOCKS_PER_TASK, resolveResourceNames, runMining } from './shared.js';
+
+/** Location names that mean "around here". */
+const HERE_LOCATIONS: ReadonlySet<string> = new Set(['nearest', 'here', 'around', 'current']);
 
 export class CollectResourceSkill implements Skill<CollectParams> {
   public readonly name: ActionType = 'collect_resource';
   public readonly conflictGroups: readonly string[] = [CONFLICT_GROUP.MINING];
 
-  constructor(private readonly facade: MinecraftFacade) {}
+  constructor(
+    private readonly facade: MinecraftFacade,
+    private readonly rules: AntiGriefRules = new AntiGriefRules(),
+  ) {}
 
   public async execute(params: CollectParams, ctx: ExecutionContext): Promise<SkillResult> {
     const resource = normaliseBlockName(params.resource ?? '');
@@ -36,13 +43,21 @@ export class CollectResourceSkill implements Skill<CollectParams> {
     const target = Math.min(requested, MAX_BLOCKS_PER_TASK);
     const label = params.resource.replace(/[_-]+/g, ' ').trim();
 
-    const where = typeof params.from === 'string' && params.from.trim().length > 0 ? ` from ${params.from.trim()}` : '';
+    // A named location ("from the mine") can only be honoured if the bot
+    // knows where that is. It does not - so say so instead of mining the
+    // nearest ore anywhere and then claiming it came from there.
+    const from = typeof params.from === 'string' ? params.from.trim().toLowerCase() : '';
+    if (from.length > 0 && !HERE_LOCATIONS.has(from)) {
+      return failedResult(`I don't know where "${params.from}" is.`, 0);
+    }
+    const where = from.length > 0 ? ` from ${from}` : '';
 
     try {
       const run = await runMining(this.facade, ctx, {
         names,
         count: target,
         label: `${label}${where}`,
+        rules: this.rules,
       });
 
       if (run.cancelled) {
@@ -71,6 +86,9 @@ export class CollectResourceSkill implements Skill<CollectParams> {
   }
 }
 
-export function createCollectResourceSkill(facade: MinecraftFacade): CollectResourceSkill {
-  return new CollectResourceSkill(facade);
+export function createCollectResourceSkill(
+  facade: MinecraftFacade,
+  rules?: AntiGriefRules,
+): CollectResourceSkill {
+  return new CollectResourceSkill(facade, rules);
 }

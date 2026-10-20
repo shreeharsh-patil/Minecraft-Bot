@@ -6,7 +6,7 @@
  *  - bearer-ish / known-prefixed token strings are scrubbed from free text;
  *  - output goes to stdout/stderr only, never back into Minecraft chat.
  */
-import { redactValue, scrubText } from './redact.js';
+import { isSecretKey, REDACTED, scrubText } from './redact.js';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent';
 
@@ -73,7 +73,10 @@ function safeSerialize(value: unknown, depth = 0, seen = new WeakSet<object>()):
     seen.add(obj);
     const out: LogFields = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = redactValue(k, v);
+      // Recurse: the old code only redacted the TOP level, so a nested
+      // `apiKey` was printed in full and a nested circular object crashed
+      // JSON.stringify inside the logger.
+      out[k] = isSecretKey(k) ? REDACTED : safeSerialize(v, depth + 1, seen);
     }
     return out;
   }
@@ -118,11 +121,13 @@ export function createLogger(options: LoggerOptions = {}): Logger {
     const emit = (lvl: Exclude<LogLevel, 'silent'>, msg: string, fields?: LogFields): void => {
       if (LEVEL_WEIGHT[lvl] < threshold) return;
       const record: LogFields = {
+        // User fields come first: the reserved keys are written last so a
+        // field named "level" or "ts" cannot rewrite the record's metadata.
+        ...(safeSerialize({ ...base, ...boundFields }) as LogFields),
+        ...(fields ? (safeSerialize(fields) as LogFields) : {}),
         ts: now().toISOString(),
         level: lvl,
         msg: scrubText(msg),
-        ...safeSerialize({ ...base, ...boundFields }) as LogFields,
-        ...(fields ? (safeSerialize(fields) as LogFields) : {}),
       };
       if (format === 'json') {
         write(JSON.stringify(record));

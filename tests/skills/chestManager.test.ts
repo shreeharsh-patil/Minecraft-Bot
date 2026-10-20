@@ -146,16 +146,44 @@ describe('WithdrawItemsSkill', () => {
     expect(result.detail).toMatch(/no cobblestone in that chest/i);
   });
 
-  it('falls back to the nearest chest when a named location is given', async () => {
+  it('refuses a named location it cannot resolve', async () => {
     const facade = worldWithChest({}, { cobblestone: 8 });
     const skill = new WithdrawItemsSkill(facade);
     const test = createTestContext();
 
     const result = await skill.execute({ item: 'cobblestone', location: 'home' }, test.ctx);
 
+    // The bot does not know where "home" is: it must say so instead of
+    // quietly taking from a different chest.
+    expect(result.ok).toBe(false);
+    expect(result.detail).toMatch(/don't know where "home" is/i);
+    expect(facade.countItem('cobblestone')).toBe(0);
+    expect(facade.chestContents(CHEST)['cobblestone']).toBe(8);
+  });
+
+  it('uses the nearest chest when the location says "nearest"', async () => {
+    const facade = worldWithChest({}, { cobblestone: 8 });
+    const skill = new WithdrawItemsSkill(facade);
+    const test = createTestContext();
+
+    const result = await skill.execute({ item: 'cobblestone', location: 'nearest' }, test.ctx);
+
     expect(result.ok).toBe(true);
     expect(result.count).toBe(8);
-    expect(test.messages.join(' ')).toMatch(/nearest chest/i);
+  });
+
+  it('treats the free slots as a stack budget, not an item count', async () => {
+    const facade = worldWithChest({}, { cobblestone: 64 });
+    const skill = new WithdrawItemsSkill(facade);
+    const test = createTestContext();
+
+    // 36 free slots is a budget of 36 * 64 items, so the whole stack of 64
+    // can be taken - not just 36 items.
+    const result = await skill.execute({ item: 'cobblestone' }, test.ctx);
+
+    expect(result.ok).toBe(true);
+    expect(result.count).toBe(64);
+    expect(facade.countItem('cobblestone')).toBe(64);
   });
 });
 

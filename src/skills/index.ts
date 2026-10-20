@@ -10,12 +10,18 @@
  *  - `EntitySummary` has no entity id, so the combat skills read an optional
  *    numeric `id` when present and otherwise swing (look + use);
  *  - there is no named-location lookup, so `deposit/withdraw` with a `location`
- *    falls back to the nearest chest and says so.
+ *    and `collect_resource` with a `from` refuse the request and say why
+ *    instead of quietly using a different place.
+ *
+ * The anti-grief rules are handed to every skill that can change the world.
+ * `AntiGriefRules` holds no state, so the default instance behaves exactly
+ * like the executor's injected one.
  */
 import type { ActionType } from '../types/actions.js';
 import { ACTION_TYPES } from '../types/actions.js';
 import type { MinecraftFacade } from '../types/facade.js';
 import type { Skill, SkillRegistry } from '../types/skill.js';
+import { AntiGriefRules } from '../safety/antiGrief.js';
 
 import { createLookAtSkill } from './basic/lookAt.js';
 import { createSaySkill } from './basic/say.js';
@@ -37,20 +43,23 @@ import { createAutoEatSkill } from './survival/autoEat.js';
 import { createDefendSkill } from './survival/defend.js';
 
 /** Builds the full registry for a facade. Fails fast on a missing skill. */
-export function createSkillRegistry(facade: MinecraftFacade): SkillRegistry {
+export function createSkillRegistry(
+  facade: MinecraftFacade,
+  antiGrief: AntiGriefRules = new AntiGriefRules(),
+): SkillRegistry {
   const skills: Array<Skill<never>> = [
     createGotoPlayerSkill(facade),
     createGotoPositionSkill(facade),
     createFollowPlayerSkill(facade),
     createStopSkill(facade),
-    createMineBlockSkill(facade),
-    createCollectResourceSkill(facade),
-    createPlaceBlockSkill(facade),
-    createBuildStructureSkill(facade),
+    createMineBlockSkill(facade, antiGrief),
+    createCollectResourceSkill(facade, antiGrief),
+    createPlaceBlockSkill(facade, antiGrief),
+    createBuildStructureSkill(facade, antiGrief),
     createEquipItemSkill(facade),
     createDropItemSkill(facade),
-    createDepositItemsSkill(facade),
-    createWithdrawItemsSkill(facade),
+    createDepositItemsSkill(facade, antiGrief),
+    createWithdrawItemsSkill(facade, antiGrief),
     createPickupItemsSkill(facade),
     createAutoEatSkill(facade),
     createAttackHostileSkill(facade),
@@ -83,6 +92,7 @@ export function conflictGroupsFor(registry: SkillRegistry, type: ActionType): re
 }
 
 export { FollowPlayerSkill, createFollowPlayerSkill } from './movement/followPlayer.js';
+export { DEFAULT_FOLLOW_DURATION_MS } from './movement/followPlayer.js';
 export { GotoPlayerSkill, createGotoPlayerSkill } from './movement/gotoPlayer.js';
 export { GotoPositionSkill, createGotoPositionSkill } from './movement/gotoPosition.js';
 export { MineBlockSkill, createMineBlockSkill } from './mining/mineBlock.js';
@@ -110,6 +120,7 @@ export { PickupItemsSkill, createPickupItemsSkill } from './inventory/pickupItem
 export type { PickupItemsParams } from './inventory/pickupItems.js';
 export { EscapeDangerSkill, createEscapeDangerSkill, detectDanger } from './survival/escapeDanger.js';
 export { DefendSkill, createDefendSkill } from './survival/defend.js';
+export { DEFAULT_DEFEND_DURATION_MS } from './survival/defend.js';
 export { AttackHostileSkill, createAttackHostileSkill } from './combat/attackHostile.js';
 export { StopSkill, createStopSkill } from './basic/stop.js';
 export { SaySkill, createSaySkill } from './basic/say.js';

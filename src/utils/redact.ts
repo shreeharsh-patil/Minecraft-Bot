@@ -89,7 +89,10 @@ export function redactValue(key: string, value: unknown): unknown {
 
 /** Scrubs credential-looking substrings out of arbitrary text. */
 export function scrubText(input: string): string {
-  let out = input;
+  // Control characters first: a newline inside a value would forge a second
+  // log line, and a terminal escape could rewrite the console.
+  // eslint-disable-next-line no-control-regex -- stripping control chars is the point
+  let out = input.replace(/[\u0000-\u001F\u007F]/g, ' ');
   for (const pattern of SECRET_VALUE_PATTERNS) {
     out = out.replace(pattern, REDACTED);
   }

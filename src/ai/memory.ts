@@ -5,9 +5,12 @@
  * RAM and is intentionally cleared on restart. Persistent memory (trusted
  * players, named locations, preferences) is written atomically to
  * `MEMORY_FILE` when configured: write to a temp file, then rename, so a crash
- * mid-write can never leave a truncated memory file behind.
+ * mid-write can never leave a truncated memory file behind. Writes are
+ * serialised and every write uses its own temp file, so two quick saves can
+ * neither overlap nor lose the store.
  */
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import type {
   MemorySnapshot,
@@ -74,6 +77,9 @@ export class InMemoryMemoryStore implements MemoryStore {
 
   private session: ShortTermMemory;
   private persistent: PersistentMemory;
+
+  /** Tail of the write queue: keeps persistent saves strictly ordered. */
+  private writes: Promise<void> = Promise.resolve();
 
   constructor(options: MemoryStoreOptions = {}) {
     this.file = options.file;
@@ -204,16 +210,36 @@ export class InMemoryMemoryStore implements MemoryStore {
   /** No-op when no file is configured. */
   public async persist(): Promise<void> {
     if (this.file === undefined) return;
+    const file = this.file;
     const payload = `${JSON.stringify({ version: 1, persistent: this.persistent }, null, 2)}\n`;
-    const temp = `${this.file}.tmp`;
+    // Writes are SERIALISED: two quick saves must not overlap. Sharing one
+    // temp file made the second rename fail (the temp file was already
+    // gone), and a half-written file is then treated as corrupt - which
+    // loses ALL persistent memory.
+    const write = this.writes.then(() => this.writeAtomically(file, payload));
+    // A failed write must not poison the chain: later saves still work.
+    this.writes = write.catch(() => undefined);
+    await write;
+  }
+
+  /**
+   * Writes the payload to a unique temp file and renames it over the target.
+   *
+   * The temp name is unique per write, so two overlapping saves can never
+   * share (and clobber) the same staging file.
+   */
+  private async writeAtomically(file: string, payload: string): Promise<void> {
+    const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      await mkdir(dirname(this.file), { recursive: true });
+      await mkdir(dirname(file), { recursive: true });
       await writeFile(temp, payload, 'utf8');
       // Atomic on every platform we target: rename replaces in one step.
-      await rename(temp, this.file);
+      await rename(temp, file);
     } catch (error) {
+      // Never leave a staging file behind.
+      await rm(temp, { force: true }).catch(() => undefined);
       this.logger.error('memory persist failed', {
-        file: this.file,
+        file,
         error: error instanceof Error ? error.message : String(error),
       });
       throw error;

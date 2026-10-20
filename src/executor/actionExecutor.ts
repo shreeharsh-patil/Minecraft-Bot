@@ -3,7 +3,9 @@
  *
  * Responsibilities:
  *  - map ActionType -> Skill via a registry (no giant switch);
- *  - enforce rate limits before every world-affecting action;
+ *  - validate every action before it can touch the world;
+ *  - enforce rate limits and per-task ceilings before every world-affecting
+ *    action;
  *  - run each action inside a cancellable task;
  *  - stop the whole sequence the moment the plan is cancelled.
  */
@@ -13,10 +15,11 @@ import type { ExecutionContext, TaskConflictGroup } from '../types/task.js';
 import { CONFLICT_GROUP } from '../types/task.js';
 import type { MinecraftFacade } from '../types/facade.js';
 import type { TaskManager, TaskHandle } from './actionQueue.js';
-import type { ActionLimits } from '../safety/actionLimits.js';
+import type { ActionLimits, LimitDecision } from '../safety/actionLimits.js';
 import type { AntiGriefRules } from '../safety/antiGrief.js';
 import type { Logger } from '../utils/logger.js';
 import { AbortedError } from '../utils/sleep.js';
+import { validateAction } from './validator.js';
 
 /** Which body-conflict group an action needs. */
 const ACTION_CONFLICT_GROUP: Record<ActionType, string> = {
@@ -87,6 +90,10 @@ export class ActionExecutor {
     const planController = new AbortController();
     this.activePlan = planController;
 
+    // The per-task ceilings (blocks mined / placed) start fresh with every
+    // plan, and are booked up as the plan runs.
+    this.deps.limits.resetTaskCounters();
+
     // Relay shutdown signals so a Ctrl+C stops the body cleanly.
     const onShutdown = (): void => planController.abort(new AbortedError('shutting down'));
     process.once('SIGINT', onShutdown);
@@ -98,14 +105,22 @@ export class ActionExecutor {
           outcome.cancelled = true;
           break;
         }
-        // `stop` mid-plan ends the sequence immediately.
+        // `stop` mid-plan ends the sequence immediately - and the body really
+        // stops: the registered stop skill is what halts the movement.
         if (action.type === 'stop') {
-          outcome.completed.push('stop');
+          const stopped = await this.execute(owner, action, planController.signal, false);
+          if (stopped.ok) {
+            outcome.completed.push('stop');
+          } else {
+            // Even without a stop skill the body must not keep walking.
+            this.deps.facade.stopMoving();
+            outcome.failed.push({ action: 'stop', reason: stopped.detail ?? 'failed' });
+          }
           outcome.cancelled = true;
           break;
         }
 
-        const result = await this.runSingle(owner, action, planController.signal);
+        const result = await this.execute(owner, action, planController.signal, false);
         if (result.cancelled) {
           outcome.cancelled = true;
           break;
@@ -130,9 +145,39 @@ export class ActionExecutor {
     action: BotAction,
     signal?: AbortSignal,
   ): Promise<SkillResult & { cancelled: boolean }> {
-    const skill = this.deps.registry.get(action.type);
+    // A standalone action is its own task, so the per-task ceilings start
+    // fresh here as well.
+    return this.execute(owner, action, signal, true);
+  }
+
+  /**
+   * The one place an action becomes a world change.
+   *
+   * `resetCounters` is false for the actions of a plan (the plan reset the
+   * per-task counters once, at its start) and true for a standalone action.
+   */
+  private async execute(
+    owner: string,
+    action: BotAction,
+    signal: AbortSignal | undefined,
+    resetCounters: boolean,
+  ): Promise<SkillResult & { cancelled: boolean }> {
+    // THE chokepoint: nothing reaches a skill without passing the shared
+    // validator, whichever path produced the action - the model, the
+    // deterministic command parser or a direct caller.
+    const validation = validateAction(action);
+    if (!validation.valid || validation.action === undefined) {
+      const reason = validation.reason ?? 'invalid action';
+      this.logger.warn('rejected invalid action', { action: action.type, reason });
+      return { ok: false, detail: reason, cancelled: false };
+    }
+    // The validated action is the one that runs: unknown keys are stripped
+    // and every field is in its canonical shape.
+    const validated = validation.action;
+
+    const skill = this.deps.registry.get(validated.type);
     if (!skill) {
-      return { ok: false, detail: `no skill registered for "${action.type}"`, cancelled: false };
+      return { ok: false, detail: `no skill registered for "${validated.type}"`, cancelled: false };
     }
 
     const rate = this.deps.limits.checkRate();
@@ -141,21 +186,32 @@ export class ActionExecutor {
     }
 
     const actionCheck = this.deps.limits.checkAction(
-      action as BotAction & Record<string, unknown>,
+      validated as BotAction & Record<string, unknown>,
     );
     if (!actionCheck.allowed) {
       return { ok: false, detail: actionCheck.reason, cancelled: false };
     }
 
+    const grief = this.checkAntiGrief(validated);
+    if (!grief.allowed) {
+      return { ok: false, detail: grief.reason, cancelled: false };
+    }
+
+    if (resetCounters) this.deps.limits.resetTaskCounters();
+    const budget = this.checkBudget(validated);
+    if (!budget.allowed) {
+      return { ok: false, detail: budget.reason, cancelled: false };
+    }
+
     const conflictGroup: TaskConflictGroup =
-      ACTION_CONFLICT_GROUP[action.type] ?? CONFLICT_GROUP.NONE;
+      ACTION_CONFLICT_GROUP[validated.type] ?? CONFLICT_GROUP.NONE;
 
     // Short-lived task handle so arbitration + cancellation work uniformly.
     const handle: TaskHandle = this.deps.tasks.start({
       owner,
-      type: action.type,
+      type: validated.type,
       conflictGroup,
-      steps: [action.type],
+      steps: [validated.type],
     });
 
     // Bridge the outer plan signal into this task's signal.
@@ -174,8 +230,9 @@ export class ActionExecutor {
     };
 
     try {
-      const result = (await (skill as Skill<BotAction>).execute(action, ctx));
+      const result = (await (skill as Skill<BotAction>).execute(validated, ctx));
       this.deps.tasks.complete(handle.record.id, result.ok ? 'completed' : 'failed', result.detail);
+      this.recordUsage(validated, result);
       return { ...result, cancelled: false };
     } catch (error) {
       const cancelled = handle.signal.aborted;
@@ -187,10 +244,91 @@ export class ActionExecutor {
         return { ok: false, detail: 'cancelled', cancelled: true };
       }
       this.deps.tasks.complete(handle.record.id, 'failed', message);
-      this.logger.error('action failed', { action: action.type, error: message });
+      this.logger.error('action failed', { action: validated.type, error: message });
       return { ok: false, detail: message, cancelled: false };
     } finally {
       signal?.removeEventListener('abort', relay);
+    }
+  }
+
+  /**
+   * The anti-grief rules that can be decided from the action alone.
+   *
+   * The position-level rules ("is this block a player's?", "is that chest
+   * theirs?") are enforced by the skills, which are the ones that know the
+   * world. What the executor can do is refuse a request for a block type
+   * that must never be broken, before any of it happens.
+   */
+  private checkAntiGrief(action: BotAction): LimitDecision {
+    if (action.type !== 'mine_block') return { allowed: true };
+    const decision = this.deps.antiGrief.canBreakBlock(action.blockName, this.deps.facade.getPosition());
+    if (decision.allowed) return decision;
+    return { allowed: false, reason: decision.reason ?? 'refusing to break that block' };
+  }
+
+  /**
+   * The per-task ceilings: one plan may not mine or place more blocks than
+   * the budget allows, no matter how the steps are split up.
+   */
+  private checkBudget(action: BotAction): LimitDecision {
+    switch (action.type) {
+      case 'mine_block':
+      case 'collect_resource': {
+        const remaining = this.deps.limits.remainingMining();
+        if (remaining <= 0) {
+          return {
+            allowed: false,
+            reason: `mining limit reached for this task (${this.deps.limits.miningCeiling()} blocks)`,
+          };
+        }
+        if (action.count > remaining) {
+          return {
+            allowed: false,
+            reason: `only ${remaining} more blocks may be mined in this task (limit ${this.deps.limits.miningCeiling()})`,
+          };
+        }
+        return { allowed: true };
+      }
+      case 'place_block': {
+        if (this.deps.limits.remainingBuilding() <= 0) {
+          return {
+            allowed: false,
+            reason: `building limit reached for this task (${this.deps.limits.buildingCeiling()} blocks)`,
+          };
+        }
+        return { allowed: true };
+      }
+      case 'build_structure': {
+        const volume = Object.values(action.dimensions).reduce((sum, n) => sum * n, 1);
+        const remaining = this.deps.limits.remainingBuilding();
+        if (volume > remaining) {
+          return {
+            allowed: false,
+            reason: `structure of ${volume} blocks exceeds the remaining build budget (${remaining})`,
+          };
+        }
+        return { allowed: true };
+      }
+      default:
+        return { allowed: true };
+    }
+  }
+
+  /** Books what an action actually did against the per-task ceilings. */
+  private recordUsage(action: BotAction, result: SkillResult): void {
+    const count = result.count ?? 0;
+    if (count <= 0) return;
+    if (action.type === 'mine_block' || action.type === 'collect_resource') {
+      const decision = this.deps.limits.recordMining(count);
+      if (!decision.allowed) {
+        this.logger.warn('mining ceiling reached', { reason: decision.reason });
+      }
+    }
+    if (action.type === 'place_block' || action.type === 'build_structure') {
+      const decision = this.deps.limits.recordBuilding(count);
+      if (!decision.allowed) {
+        this.logger.warn('building ceiling reached', { reason: decision.reason });
+      }
     }
   }
 

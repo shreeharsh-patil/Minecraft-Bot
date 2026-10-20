@@ -62,6 +62,8 @@ export class WorldState {
 
   private cachedScanAt = 0;
   private cachedBlocks: Array<{ name: string; distance: number; position: Vec3Like }> = [];
+  private cachedChestAt = 0;
+  private cachedChests: Array<{ distance: number; position: Vec3Like }> = [];
 
   constructor(facade: MinecraftFacade, logger: Logger, options: WorldStateOptions = {}) {
     this.facade = facade;
@@ -74,6 +76,7 @@ export class WorldState {
   /** Invalidates the scan cache (call after the bot moves significantly). */
   invalidate(): void {
     this.cachedScanAt = 0;
+    this.cachedChestAt = 0;
   }
 
   private nearbyBlocks(now: number): Array<{ name: string; distance: number; position: Vec3Like }> {
@@ -101,10 +104,15 @@ export class WorldState {
   }
 
   private nearbyChests(now: number): Array<{ distance: number; position: Vec3Like }> {
+    // Cached like the block scan: the chest lookup walks the world and was
+    // repeated on every single context build.
+    if (now - this.cachedChestAt < this.scanTtlMs) return this.cachedChests;
     const chest = this.facade.findNearestChest(16);
-    if (!chest) return [];
-    void now;
-    return [{ distance: Math.round(chest.distance * 10) / 10, position: roundPos(chest.position) }];
+    this.cachedChests = chest
+      ? [{ distance: Math.round(chest.distance * 10) / 10, position: roundPos(chest.position) }]
+      : [];
+    this.cachedChestAt = now;
+    return this.cachedChests;
   }
 
   /** Builds the compact snapshot handed to the LLM. */

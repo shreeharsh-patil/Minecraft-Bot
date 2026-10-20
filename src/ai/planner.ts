@@ -85,20 +85,69 @@ function readString(value: unknown, maxChars: number = LIMITS.nameChars): string
   return cleaned.slice(0, maxChars);
 }
 
+/**
+ * Numbers a model may write as text: a plain decimal, optionally signed.
+ * Anything else ("all", "", "1e3", "NaN") is not a number we are willing to
+ * turn into an action parameter.
+ */
+const NUMERIC_TEXT = /^[+-]?\d+(?:\.\d+)?$/;
+
+/**
+ * Reads a number out of a JSON value.
+ *
+ * Text must look like a plain decimal. An empty or whitespace-only string is
+ * NOT zero - it is a missing value, and treating it as zero would send the
+ * bot to 0,0,0 instead of dropping the action.
+ */
+function toFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  if (!NUMERIC_TEXT.test(trimmed)) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 /** Finite number clamped into [min, max], or undefined. */
 function readNumber(value: unknown, min: number, max: number): number | undefined {
-  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
-  if (!Number.isFinite(n)) return undefined;
+  const n = toFiniteNumber(value);
+  if (n === undefined) return undefined;
   if (n < min) return min;
   if (n > max) return max;
   return n;
 }
 
-/** A finite integer count, defaulting to `fallback` when absent/invalid. */
-function readCount(value: unknown, fallback: number): number {
-  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
-  if (!Number.isFinite(n)) return fallback;
+/**
+ * A count the model supplied.
+ *
+ * Returns undefined when the value cannot be read as a count at all. An
+ * absent count and a malformed one ("all", "", "lots") are both "no count" -
+ * they are never coerced to 1, because dropping is always safer than
+ * coercing and `{"count": "all"}` must not become "drop exactly one".
+ */
+function readCount(value: unknown): number | undefined {
+  const n = toFiniteNumber(value);
+  if (n === undefined) return undefined;
   return Math.max(1, Math.min(LIMITS.count, Math.round(n)));
+}
+
+/**
+ * The outcome of reading an OPTIONAL count.
+ *
+ * `absent` - the field was not there, so it is simply omitted.
+ * `invalid` - the field was there but unusable: the action is dropped.
+ * `value` - a usable count.
+ */
+type OptionalCount =
+  | { kind: 'absent' }
+  | { kind: 'invalid' }
+  | { kind: 'value'; count: number };
+
+function readOptionalCount(value: unknown): OptionalCount {
+  if (value === undefined) return { kind: 'absent' };
+  const count = readCount(value);
+  return count === undefined ? { kind: 'invalid' } : { kind: 'value', count };
 }
 
 /** Rounds to whole blocks - the world has no sub-block precision. */
@@ -168,14 +217,14 @@ const VALIDATORS: Readonly<Record<ActionType, Validator>> = {
   stop: (raw) => ({ type: 'stop', ...note(raw) }),
   mine_block: (raw) => {
     const blockName = readString(raw['blockName']);
-    const count = readCount(raw['count'], Number.NaN);
-    if (blockName === undefined || !Number.isFinite(count)) return undefined;
+    const count = readCount(raw['count']);
+    if (blockName === undefined || count === undefined) return undefined;
     return { type: 'mine_block', blockName, count, ...note(raw) };
   },
   collect_resource: (raw) => {
     const resource = readString(raw['resource']);
-    const count = readCount(raw['count'], Number.NaN);
-    if (resource === undefined || !Number.isFinite(count)) return undefined;
+    const count = readCount(raw['count']);
+    if (resource === undefined || count === undefined) return undefined;
     const from = readString(raw['from']);
     return {
       type: 'collect_resource',
@@ -193,12 +242,14 @@ const VALIDATORS: Readonly<Record<ActionType, Validator>> = {
   drop_item: (raw) => {
     const item = readString(raw['item']);
     if (item === undefined) return undefined;
-    const count = raw['count'] === undefined ? undefined : readCount(raw['count'], 1);
+    const count = readOptionalCount(raw['count']);
+    // A count that is present but unreadable makes the action invalid.
+    if (count.kind === 'invalid') return undefined;
     const where = raw['where'] === 'chest' || raw['where'] === 'floor' ? raw['where'] : undefined;
     return {
       type: 'drop_item',
       item,
-      ...(count !== undefined ? { count } : {}),
+      ...(count.kind === 'value' ? { count: count.count } : {}),
       ...(where !== undefined ? { where } : {}),
       ...note(raw),
     };
@@ -216,23 +267,25 @@ const VALIDATORS: Readonly<Record<ActionType, Validator>> = {
   withdraw_items: (raw) => {
     const item = readString(raw['item']);
     const location = readString(raw['location']);
-    const count = raw['count'] === undefined ? undefined : readCount(raw['count'], 1);
+    const count = readOptionalCount(raw['count']);
+    if (count.kind === 'invalid') return undefined;
     return {
       type: 'withdraw_items',
       ...(item !== undefined ? { item } : {}),
-      ...(count !== undefined ? { count } : {}),
+      ...(count.kind === 'value' ? { count: count.count } : {}),
       ...(location !== undefined ? { location } : {}),
       ...note(raw),
     };
   },
   pickup_items: (raw) => {
     const item = readString(raw['item']);
-    const count = raw['count'] === undefined ? undefined : readCount(raw['count'], 1);
+    const count = readOptionalCount(raw['count']);
+    if (count.kind === 'invalid') return undefined;
     const radius = readNumber(raw['radius'], 1, LIMITS.radius);
     return {
       type: 'pickup_items',
       ...(item !== undefined ? { item } : {}),
-      ...(count !== undefined ? { count } : {}),
+      ...(count.kind === 'value' ? { count: count.count } : {}),
       ...(radius !== undefined ? { radius } : {}),
       ...note(raw),
     };
@@ -319,6 +372,8 @@ place_block: (raw) => {
   say: (raw) => {
     const message = readString(raw['message'], SAY_MESSAGE_CHARS);
     if (message === undefined) return undefined;
+    // A leading slash is executed as a server command, not spoken as chat.
+    if (message.trim().startsWith('/') || message.trim().startsWith('\\')) return undefined;
     if (detectInjectedIntent(message)) return undefined;
     return { type: 'say', message, ...note(raw) };
   },
@@ -353,10 +408,6 @@ export function parseActions(payload: unknown, maxActions = DEFAULT_MAX_ACTIONS)
 
   const actions: BotAction[] = [];
   for (const candidate of candidates) {
-    if (actions.length >= maxActions) {
-      dropped.push({ reason: 'max-actions-exceeded', raw: candidate });
-      continue;
-    }
     if (!isRecord(candidate)) {
       dropped.push({ reason: 'not-an-object', raw: candidate });
       continue;
@@ -373,6 +424,13 @@ export function parseActions(payload: unknown, maxActions = DEFAULT_MAX_ACTIONS)
     const action = validator(candidate);
     if (action === undefined) {
       dropped.push({ reason: `invalid-parameters:${type}`, raw: candidate });
+      continue;
+    }
+    // The cap is applied to VALID actions only. An invalid action beyond the
+    // cap must report its real validation failure, not "max-actions-exceeded",
+    // or the actual problem is hidden in the dropped log.
+    if (actions.length >= maxActions) {
+      dropped.push({ reason: 'max-actions-exceeded', raw: candidate });
       continue;
     }
     actions.push(action);

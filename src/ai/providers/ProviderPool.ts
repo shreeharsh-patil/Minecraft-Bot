@@ -5,7 +5,10 @@
  * *whether it can be trusted right now*:
  *  - per-provider rolling stats with an exponential moving average latency;
  *  - a circuit breaker: closed -> open (after N consecutive failures) ->
- *    half_open (after the cooldown, allowing one probe) -> closed on success.
+ *    half_open (after the cooldown, allowing one probe) -> closed on success;
+ *  - the cached `AiProvider.healthCheck()` verdict: a provider whose probe
+ *    failed is skipped, and the probe runs in the background so the request
+ *    path never waits for it.
  *
  * The pool never performs I/O itself; `register` also accepts providers that are
  * unavailable (no key), which are simply skipped by `getAvailable`.
@@ -54,6 +57,8 @@ export interface ProviderPoolOptions {
   cooldownMs: number;
   /** EMA smoothing factor for latency (0..1]. */
   emaAlpha?: number;
+  /** How long a health verdict stays authoritative before it is refreshed. */
+  healthTtlMs?: number;
   logger?: Logger;
   /** Injected clock, so tests can drive the cooldown deterministically. */
   now?: () => number;
@@ -63,7 +68,22 @@ interface Entry {
   provider: AiProvider;
   tier: ProviderTier;
   stats: MutableStats;
+  /** True while a half-open circuit probe is in flight. */
+  probeInFlight: boolean;
+  /** Last health verdict, or null when the provider was never probed. */
+  health: HealthVerdict | null;
+  /** The background health probe currently running, if any. */
+  healthProbe: Promise<boolean> | null;
 }
+
+/** The cached outcome of one `AiProvider.healthCheck()` probe. */
+interface HealthVerdict {
+  ok: boolean;
+  checkedAt: number;
+}
+
+/** How long a health verdict is trusted before a fresh probe is scheduled. */
+const DEFAULT_HEALTH_TTL_MS = 60_000;
 
 function freshStats(name: ProviderName, tier: ProviderTier, available: boolean): MutableStats {
   return {
@@ -109,6 +129,7 @@ export class ProviderPool {
   private readonly failureThreshold: number;
   private readonly cooldownMs: number;
   private readonly emaAlpha: number;
+  private readonly healthTtlMs: number;
   private readonly logger: Logger;
   private readonly now: () => number;
 
@@ -116,6 +137,7 @@ export class ProviderPool {
     this.failureThreshold = Math.max(1, Math.floor(options.failureThreshold));
     this.cooldownMs = Math.max(1, Math.floor(options.cooldownMs));
     this.emaAlpha = Math.min(1, Math.max(0.01, options.emaAlpha ?? 0.3));
+    this.healthTtlMs = Math.max(1_000, Math.floor(options.healthTtlMs ?? DEFAULT_HEALTH_TTL_MS));
     this.logger = options.logger ?? silentLogger;
     this.now = options.now ?? (() => Date.now());
   }
@@ -128,14 +150,24 @@ export class ProviderPool {
       existing.tier = tier;
       existing.stats.tier = tier;
       existing.stats.available = provider.isAvailable();
+      // A replaced provider gets a fresh verdict; the old one says nothing
+      // about the new key or base URL.
+      existing.health = null;
+      existing.healthProbe = null;
+      this.scheduleProbe(existing);
       return;
     }
-    this.entries.set(provider.name, {
+    const entry: Entry = {
       provider,
       tier,
       stats: freshStats(provider.name, tier, provider.isAvailable()),
-    });
+      probeInFlight: false,
+      health: null,
+      healthProbe: null,
+    };
+    this.entries.set(provider.name, entry);
     this.logger.debug('provider registered', { provider: provider.name, tier });
+    this.scheduleProbe(entry);
   }
 
   public get(name: ProviderName): AiProvider | undefined {
@@ -152,25 +184,53 @@ export class ProviderPool {
   }
 
   /**
-   * Providers eligible right now: has a key, and its circuit is not `open`.
-   * An `open` circuit whose cooldown has elapsed is transitioned to `half_open`
-   * here, which makes exactly one probe eligible.
+   * Providers eligible right now: has a key, its health probe has not failed,
+   * and its circuit is not `open`. An `open` circuit whose cooldown has
+   * elapsed is transitioned to `half_open` here, which makes exactly one
+   * probe eligible.
    */
   public getAvailable(tier?: ProviderTier): AiProvider[] {
     const now = this.now();
-    const out: AiProvider[] = [];
+    const tierMatches: AiProvider[] = [];
+    const all: AiProvider[] = [];
     for (const entry of this.entries.values()) {
-      if (tier !== undefined && entry.tier !== tier) continue;
       if (!entry.provider.isAvailable()) {
         entry.stats.available = false;
         continue;
       }
       entry.stats.available = true;
+      // A provider whose health probe failed is skipped: selecting it would
+      // only burn the attempt budget of every request on a dead key or a
+      // wrong base URL.
+      if (this.isUnhealthy(entry, now)) continue;
       this.refreshCircuit(entry, now);
       if (entry.stats.circuit.state === 'open') continue;
-      out.push(entry.provider);
+      // A half-open circuit allows exactly ONE probe, not one per request.
+      if (entry.stats.circuit.state === 'half_open' && entry.probeInFlight) continue;
+      all.push(entry.provider);
+      if (tier === undefined || entry.tier === tier) tierMatches.push(entry.provider);
     }
-    return out;
+    if (tierMatches.length > 0) return tierMatches;
+    // The requested tier is empty (for example only a "planning" tier provider
+    // is configured). A configured provider of another tier is still usable,
+    // so cross tiers instead of failing the request outright.
+    if (tier !== undefined && all.length > 0) {
+      this.logger.info('no provider in the requested tier, falling back across tiers', {
+        tier,
+        candidates: all.length,
+      });
+      for (const entry of this.entries.values()) {
+        if (entry.stats.circuit.state === 'half_open') entry.probeInFlight = true;
+      }
+      return all;
+    }
+    // Mark the half-open probes we are actually handing out.
+    for (const entry of this.entries.values()) {
+      if (entry.stats.circuit.state === 'half_open' && all.includes(entry.provider)) {
+        entry.probeInFlight = true;
+      }
+    }
+    return all;
   }
 
   /** Current circuit state, applying any pending cooldown transition. */
@@ -179,6 +239,97 @@ export class ProviderPool {
     if (!entry) return undefined;
     this.refreshCircuit(entry, this.now());
     return entry.stats.circuit.state;
+  }
+
+  // --- health probe --------------------------------------------------------------
+
+  /**
+   * The cached health verdict for a provider, or undefined when it has never
+   * been probed.
+   */
+  public healthOf(name: ProviderName): { ok: boolean; checkedAt: number } | undefined {
+    const health = this.entries.get(name)?.health;
+    return health ?? undefined;
+  }
+
+  /**
+   * Probes one provider now and caches the verdict.
+   *
+   * The request path never awaits a probe - a provider whose key was revoked
+   * must not add latency to every request. This method exists for callers
+   * that want the answer before deciding anything.
+   */
+  public async probeHealth(name: ProviderName): Promise<boolean> {
+    const entry = this.entries.get(name);
+    if (!entry) return false;
+    if (entry.healthProbe !== null) return entry.healthProbe;
+    const probe = this.runProbe(entry);
+    entry.healthProbe = probe;
+    try {
+      return await probe;
+    } finally {
+      if (entry.healthProbe === probe) entry.healthProbe = null;
+    }
+  }
+
+  /**
+   * True when the last health probe said "no".
+   *
+   * The verdict stays authoritative for `healthTtlMs`; once it is stale a
+   * fresh probe is scheduled in the background, but the provider stays out of
+   * the rotation until that probe says it is healthy again. A provider that
+   * has never been probed is allowed through - the verdict may simply not be
+   * in yet.
+   */
+  private isUnhealthy(entry: Entry, now: number): boolean {
+    const health = entry.health;
+    if (health === null || health.ok) return false;
+    if (now - health.checkedAt >= this.healthTtlMs) {
+      // The verdict is stale: refresh it in the background so a recovered
+      // provider can come back without a restart.
+      this.scheduleProbe(entry);
+    }
+    return true;
+  }
+
+  /** Starts a background health probe, unless one is already running. */
+  private scheduleProbe(entry: Entry): void {
+    if (entry.healthProbe !== null) return;
+    const probe = this.runProbe(entry);
+    entry.healthProbe = probe;
+    void probe
+      .catch(() => false)
+      .finally(() => {
+        if (entry.healthProbe === probe) entry.healthProbe = null;
+      });
+  }
+
+  /**
+   * Runs one health probe and caches the verdict.
+   * Never rejects: a probe that throws simply means "unhealthy".
+   */
+  private async runProbe(entry: Entry): Promise<boolean> {
+    const provider = entry.provider;
+    const name = provider.name;
+    let ok = false;
+    try {
+      ok = await provider.healthCheck();
+    } catch (error) {
+      ok = false;
+      this.logger.warn('provider health probe threw', {
+        provider: name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    // A provider that was replaced while the probe was running says nothing
+    // about the new one: the stale verdict is dropped.
+    if (entry.provider === provider) {
+      entry.health = { ok, checkedAt: this.now() };
+      if (!ok) {
+        this.logger.warn('provider health probe failed, skipping it until it recovers', { provider: name });
+      }
+    }
+    return ok;
   }
 
   /** Records a success: closes the circuit and folds latency into the EMA. */

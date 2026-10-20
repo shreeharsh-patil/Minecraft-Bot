@@ -33,6 +33,14 @@ import { BOT_TIMING } from './config/constants.js';
 import { startHealthServer, type HealthServerHandle } from './healthServer.js';
 import { fileURLToPath } from 'node:url';
 
+/**
+ * A session shorter than this counts as "the server rejected the bot" rather
+ * than "the server restarted". Three of those in a row stop the bot instead
+ * of hammering the server with reconnects.
+ */
+const MIN_SESSION_UPTIME_MS = 30_000;
+const MAX_DROPPED_SESSIONS = 3;
+
 interface Wiring {
   responder: ChatResponder;
   memory: MemoryStore;
@@ -57,6 +65,16 @@ export class BotApp {
   private detachEvents: (() => void) | null = null;
   /** Platform keep-alive listener (Render etc.); auxiliary, never fatal. */
   private readonly health: HealthServerHandle | null;
+  /** Memoised shutdown: concurrent callers wait for the same shutdown. */
+  private shutdownPromise: Promise<void> | null = null;
+  /**
+   * Sessions that connected and were dropped again without the bot doing any
+   * work. A server that accepts the join and then kicks the bot would
+   * otherwise be retried forever (a reconnect storm).
+   */
+  private droppedSessions = 0;
+  /** When the current session connected (null while disconnected). */
+  private connectedAt: number | null = null;
 
   private constructor(config: AppConfig, logger: Logger, health: HealthServerHandle | null = null) {
     this.config = config;
@@ -129,6 +147,9 @@ export class BotApp {
       logger: this.logger,
     });
     this.connection = connection;
+    // Remember when this session started: a session that dies within
+    // MIN_SESSION_UPTIME_MS was rejected, not interrupted.
+    this.connectedAt = Date.now();
 
     const facade = new MineflayerFacade(connection.bot, this.logger);
     const auth = new AuthorizationService(this.config);
@@ -368,6 +389,25 @@ export class BotApp {
     this.reconnecting = true;
     this.logger.info('connection lost - attempting bounded reconnect', { reason });
 
+    // A server that accepts the join and immediately drops it again would be
+    // retried forever (a reconnect storm that can get the account banned).
+    // Count sessions that died young and stop once the pattern is obvious.
+    const uptimeMs = this.connectedAt === null ? 0 : Date.now() - this.connectedAt;
+    if (uptimeMs < MIN_SESSION_UPTIME_MS) {
+      this.droppedSessions += 1;
+    } else {
+      this.droppedSessions = 0;
+    }
+    if (this.droppedSessions >= MAX_DROPPED_SESSIONS) {
+      this.logger.error('server keeps dropping the bot right after joining - giving up', {
+        reason,
+        droppedSessions: this.droppedSessions,
+      });
+      process.exitCode = 1;
+      await this.shutdown('repeated immediate disconnects');
+      return;
+    }
+
     try {
       const oldAi = this.teardownSession(`disconnected: ${reason}`);
       // Release the previous session's provider sockets before reconnecting.
@@ -432,8 +472,18 @@ export class BotApp {
 
   /** Orderly shutdown: cancel work, stop timers, quit the client. */
   async shutdown(reason: string): Promise<void> {
-    if (this.stopping) return;
-    this.stopping = true;
+    // Memoised: a second caller (a SIGTERM arriving while the presence
+    // monitor is already shutting down) must WAIT for the first shutdown
+    // instead of returning immediately and letting the process exit before
+    // the bot quit cleanly.
+    if (!this.shutdownPromise) {
+      this.stopping = true;
+      this.shutdownPromise = this.runShutdown(reason);
+    }
+    return this.shutdownPromise;
+  }
+
+  private async runShutdown(reason: string): Promise<void> {
     this.logger.info('shutting down', { reason });
     // Unwind any pending reconnect sleep/attempt immediately.
     this.lifecycle.abort();
@@ -471,10 +521,9 @@ export class BotApp {
 
 /** Process entry point. */
 async function main(): Promise<void> {
-  let app: BotApp;
+  let app: BotApp | undefined;
   try {
     app = await BotApp.create();
-    await app.start();
   } catch (error) {
     if (error instanceof ConfigError) {
       // Config errors are user-actionable: no stack trace, just what to fix.
@@ -490,12 +539,30 @@ async function main(): Promise<void> {
 
   const active = app;
   const shutdown = (signal: string): void => {
-    void active.shutdown(signal).finally(() => {
-      process.exit(0);
+    // No process.exit(): the event loop drains on its own once the socket and
+    // the health server are closed, and stdout is flushed properly. A forced
+    // exit regularly swallowed the last log lines.
+    void active.shutdown(signal).catch((error: unknown) => {
+      process.stderr.write(`shutdown failed: ${String(error)}\n`);
     });
   };
+  // Registered BEFORE the (possibly slow) startup: a SIGTERM during the
+  // reconnect backoff must still close the bot and release the port.
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  try {
+    await active.start();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`Fatal: ${message}\n`);
+    process.exitCode = 1;
+    // Release the health server: otherwise the open listener keeps the event
+    // loop alive, the process never exits, and the platform keeps billing a
+    // service that gave up connecting.
+    await active.shutdown('startup failed').catch(() => undefined);
+    return;
+  }
 
   // Periodic housekeeping: drop settled tasks so memory stays flat.
   const housekeeping = setInterval(() => {

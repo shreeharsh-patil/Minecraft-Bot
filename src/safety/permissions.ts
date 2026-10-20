@@ -5,6 +5,10 @@
  *  1. an allowlist of authorized usernames (AUTHORIZED_PLAYERS);
  *  2. a per-player rate limit so one person cannot flood the bot.
  *
+ * The allowlist comes from the configuration alone: there is no runtime
+ * promotion path, so the set of players who can command the bot is exactly
+ * the set the operator configured.
+ *
  * Unauthorized players may still chat - their messages are simply never
  * turned into instructions.
  */
@@ -22,29 +26,22 @@ export interface ChatPrincipal {
 }
 
 export class AuthorizationService {
-  /** Mutable at runtime so `!trust` can promote a player. */
+  /** The authorized usernames, already lower-cased by the config loader. */
   private readonly allowed: Set<string>;
   private readonly windowMs: number;
   private readonly maxCommands: number;
   /** player -> timestamps of recent commands (sliding window). */
   private readonly hits = new Map<string, number[]>();
-  private readonly trustedMemory: { isTrusted(name: string): boolean };
 
-  constructor(config: AppConfig, trustedMemory?: { isTrusted(name: string): boolean }) {
+  constructor(config: AppConfig) {
     this.allowed = new Set(config.authorizedPlayers);
     this.windowMs = config.chat.rateLimit.windowMs;
     this.maxCommands = config.chat.rateLimit.maxCommands;
-    this.trustedMemory = trustedMemory ?? { isTrusted: () => false };
   }
 
   /** Static allowlist check - does not consume rate limit budget. */
   isAuthorized(username: string): boolean {
-    return this.allowed.has(username.toLowerCase()) || this.trustedMemory.isTrusted(username);
-  }
-
-  /** Adds an authorized player at runtime (e.g. `!trust Player`). */
-  addAuthorized(username: string): void {
-    this.allowed.add(username.toLowerCase());
+    return this.allowed.has(username.toLowerCase());
   }
 
   /**

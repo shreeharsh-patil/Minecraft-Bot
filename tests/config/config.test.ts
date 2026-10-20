@@ -45,13 +45,36 @@ describe('buildConfig - platform health port', () => {
   });
 
   it('falls back to the platform-injected PORT (Render convention)', () => {
-    const config = buildConfig(defaultTestEnv({ PORT: '10000' }));
+    const config = buildConfig(defaultTestEnv({ PORT: '10000', RENDER: 'true' }));
     expect(config.runtime.healthPort).toBe(10_000);
+  });
+
+  it('ignores an unrelated PORT when no platform marker is present', () => {
+    // A stray PORT (a dev server, a proxy) must not make the bot open a port.
+    const config = buildConfig(defaultTestEnv({ PORT: '3000' }));
+    expect(config.runtime.healthPort).toBeUndefined();
   });
 
   it('rejects nonsense ports', () => {
     const issues = issuesFor(defaultTestEnv({ HEALTH_PORT: '70000' }));
     expect(hasIssue(issues, 'HEALTH_PORT must be a port number')).toBe(true);
+  });
+});
+
+describe('buildConfig - strict numbers', () => {
+  it('rejects a port with trailing garbage instead of silently parsing it', () => {
+    const issues = issuesFor(defaultTestEnv({ MC_PORT: '25565abc' }));
+    expect(hasIssue(issues, 'MC_PORT must be an integer')).toBe(true);
+  });
+
+  it('rejects a port outside the valid TCP range', () => {
+    const issues = issuesFor(defaultTestEnv({ MC_PORT: '99999' }));
+    expect(hasIssue(issues, 'MC_PORT must be a valid port number')).toBe(true);
+  });
+
+  it('accepts a normal port', () => {
+    const config = buildConfig(defaultTestEnv({ MC_PORT: '25566' }));
+    expect(config.minecraft.port).toBe(25_566);
   });
 });
 

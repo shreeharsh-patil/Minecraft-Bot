@@ -1,8 +1,9 @@
 /**
  * Guard a player: stay near them and attack anything hostile that closes in.
  *
- * Runs until `ctx.signal` aborts or `durationMs` elapses. Always stops moving
- * on the way out, and never throws for ordinary combat conditions.
+ * Runs until `ctx.signal` aborts or the (always bounded) duration elapses.
+ * Always stops moving on the way out, and never throws for ordinary combat
+ * conditions.
  */
 import { MOVEMENT } from '../../config/constants.js';
 import type { MinecraftFacade } from '../../types/facade.js';
@@ -12,9 +13,11 @@ import type { ActionType } from '../../types/actions.js';
 import { CONFLICT_GROUP } from '../../types/task.js';
 import type { ExecutionContext } from '../../types/task.js';
 import { distance3 } from '../../types/world.js';
+import { MAX_DEFEND_DURATION_MS } from '../../safety/actionLimits.js';
 import { createLogger } from '../../utils/logger.js';
 import { sleep } from '../../utils/sleep.js';
 import {
+  ChatGate,
   clamp,
   describeError,
   failedResult,
@@ -23,7 +26,7 @@ import {
   reportProgress,
   resolveEntityId,
 } from '../internal/helpers.js';
-import { isHostile } from './escapeDanger.js';
+import { ESCAPE_DISTANCE, ESCAPE_RADIUS, EscapeDangerSkill, isHostile, needsEscape } from './escapeDanger.js';
 
 const log = createLogger({ level: 'info' }).child({ layer: 'skills', skill: 'defend' });
 
@@ -33,12 +36,26 @@ const GUARD_TICK_MS = 500;
 const DEFAULT_GUARD_RADIUS = 8;
 /** Attack range. */
 const ATTACK_RANGE = 3;
+/**
+ * How long a guard runs when the action does not say.
+ *
+ * A guard with no deadline would keep the combat conflict group claimed for
+ * ever and the player would never get a result. A minute is long enough to
+ * cover a fight and short enough to end on its own.
+ */
+export const DEFAULT_DEFEND_DURATION_MS = 60_000;
+/** At most one chat line per interval: servers punish repeated spam. */
+const CHAT_INTERVAL_MS = 10_000;
 
 export class DefendSkill implements Skill<DefendParams> {
   public readonly name: ActionType = 'defend_player';
   public readonly conflictGroups: readonly string[] = [CONFLICT_GROUP.COMBAT, CONFLICT_GROUP.MOVEMENT];
 
-  constructor(private readonly facade: MinecraftFacade) {}
+  private readonly escape: EscapeDangerSkill;
+
+  constructor(private readonly facade: MinecraftFacade) {
+    this.escape = new EscapeDangerSkill(facade);
+  }
 
   public async execute(params: DefendParams, ctx: ExecutionContext): Promise<SkillResult> {
     const player = typeof params.player === 'string' ? params.player.trim() : '';
@@ -46,21 +63,42 @@ export class DefendSkill implements Skill<DefendParams> {
       return failedResult('I need to know who to guard.', 0);
     }
     const radius = clamp(params.radius ?? DEFAULT_GUARD_RADIUS, 2, 24);
-    const durationMs = params.durationMs !== undefined ? clamp(params.durationMs, 0, 3_600_000) : null;
-    const deadline = durationMs !== null ? Date.now() + durationMs : null;
+    // The duration is always bounded: an unbounded guard would never let go
+    // of the combat conflict group.
+    const durationMs = clamp(
+      params.durationMs ?? DEFAULT_DEFEND_DURATION_MS,
+      0,
+      MAX_DEFEND_DURATION_MS,
+    );
+    const deadline = Date.now() + durationMs;
+    const chat = new ChatGate(CHAT_INTERVAL_MS);
 
     let attacked = 0;
     let ticks = 0;
 
     try {
       while (!ctx.signal.aborted) {
+        if (Date.now() >= deadline) break;
         ticks += 1;
-        if (deadline !== null && Date.now() >= deadline) break;
+
+        // The escape reflex comes first: standing in lava outranks guarding.
+        if (needsEscape(this.facade, ESCAPE_RADIUS)) {
+          const escaped = await this.escape.execute(
+            { radius: ESCAPE_RADIUS, distance: ESCAPE_DISTANCE },
+            ctx,
+          );
+          if (!escaped.ok) {
+            log.warn('escape reflex failed', { player, detail: escaped.detail });
+          }
+          await sleep(GUARD_TICK_MS, ctx.signal);
+          continue;
+        }
 
         const sighting = this.facade.getNearestPlayer(player);
         if (!sighting) {
           this.facade.stopMoving();
-          ctx.say(`I can't see ${player} - I'm holding position.`);
+          // Rate limited: the same line twice a second would be chat spam.
+          chat.speak(ctx, `I can't see ${player} - I'm holding position.`);
           await sleep(GUARD_TICK_MS, ctx.signal);
           continue;
         }

@@ -202,13 +202,6 @@ The bot ships adapters for four providers:
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
 | OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4o-mini` |
 
-| Provider | Endpoint | Default model |
-| --- | --- | --- |
-| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
-| Gemini | `https://generativelanguage.googleapis.com/v1beta` | `gemini-2.5-flash` |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
-| OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4o-mini` |
-
 Set `AI_PROVIDER_PRIORITY` to control order. Providers without an API key are skipped
 automatically. The router tracks latency, successes, failures, timeouts, 429s and
 availability per provider, prefers the fastest healthy provider for normal requests, and
@@ -224,10 +217,16 @@ image, and no key is ever written to a log or echoed into Minecraft chat.
 - **Closed action allowlist.** The planner can only emit `move_to_player`,
   `move_to_position`, `follow_player`, `stop`, `mine_block`, `collect_resource`,
   `place_block`, `build_structure`, `equip_item`, `drop_item`, `deposit_items`,
-  `withdraw_items`, `eat`, `attack_hostile`, `defend_player`, `look_at` or `wait`.
-  Anything else is dropped and logged.
+  `withdraw_items`, `pickup_items`, `eat`, `attack_hostile`, `defend_player`,
+  `look_at`, `wait` or `say`. Anything else is dropped and logged.
+- **One validation funnel.** Every action - from the LLM planner, from the
+  offline planner and from the `!` commands - is validated by the same
+  validator before it reaches a skill. Invalid parameters are refused, not
+  coerced into something plausible.
 - **No arbitrary execution.** The model can never run JavaScript, shell commands or
   Minecraft server commands. It produces data; the executor decides what is allowed.
+  A chat line starting with `/` is a server command, so it is rejected in both
+  the validator and the chat reply gate.
 - **Prompt-injection defence.** Player chat is sanitised, wrapped as untrusted data,
   stripped of injection markers, and requests for credentials, environment variables,
   files or shell access are refused outright. The allowlist means injected text cannot
@@ -278,14 +277,22 @@ cancellation, rate limiting, anti-grief limits, configuration validation, and th
 mining, inventory, building and survival skills (run against an in-memory fake facade, so no
 server is needed).
 
+It also covers the two paths that are easy to break silently: the **chat payload format**
+(mineflayer changed the shape of the `message` event - a wrong read makes the bot mute) and
+the **end-to-end request path** from a chat line to a world action (`tests/integration`).
+
+CI runs the whole gate on every push: `npm run typecheck`, `npm run lint`, `npm test` and
+`npm run build` (`.github/workflows/typescript.yml`).
+
 ## Troubleshooting
 
 **Configuration error on startup.** `buildConfig` prints every problem at once, for example
-`MC_HOST is required (see .env.example)` or `No usable AI provider. Set at least one API
-key: GROQ_API_KEY`. Fix the listed variables and restart.
+`MC_HOST is required (see .env.example)`. Fix the listed variables and restart.
 
-**"No usable AI provider".** The provider named in `AI_PROVIDER_PRIORITY` has no matching
-API key variable set. Either set the key or drop that provider from the priority list.
+**"No usable AI provider".** Only appears when `AI_LOCAL_PLANNER=false`: the provider named
+in `AI_PROVIDER_PRIORITY` has no matching API key variable. Either set the key, drop that
+provider from the priority list, or leave `AI_LOCAL_PLANNER=true` (the default) to run the
+built-in offline planner instead - with no key at all the bot still starts and answers.
 
 **Bot disconnects after a minute.** That is Aternos safe mode working. Raise
 `HUMAN_TIMEOUT_SECONDS` if you idle longer than that, or set

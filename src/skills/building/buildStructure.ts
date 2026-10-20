@@ -7,6 +7,9 @@
  *  - dimensions are clamped to sane caps, and the total block count is capped;
  *  - the material is checked up front so a missing-material run fails fast and
  *    clearly instead of placing half a house;
+ *  - dangerous materials (tnt, cactus, ...) are never placed;
+ *  - a cell that is occupied, or that somebody is standing in, is skipped
+ *    rather than overwritten;
  *  - the loop honours `ctx.signal` between every block.
  */
 import type { MinecraftFacade } from '../../types/facade.js';
@@ -16,13 +19,16 @@ import { CONFLICT_GROUP } from '../../types/task.js';
 import type { ExecutionContext } from '../../types/task.js';
 import type { BlockPos, Vec3Like } from '../../types/world.js';
 import { distance3 } from '../../types/world.js';
+import { AntiGriefRules } from '../../safety/antiGrief.js';
 import {
   clamp,
   describeError,
+  entityOccupiesCell,
   failedResult,
   floorPos,
   guardedOp,
   isCancellation,
+  isDangerousBlock,
   navigateToPosition,
   normaliseBlockName,
   reportProgress,
@@ -40,17 +46,6 @@ const LIMITS = {
   platform: { length: 16, width: 16 },
   simple_house: { size: 9, height: 6 },
 } as const;
-
-const REPLACEABLE: ReadonlySet<string> = new Set([
-  'air',
-  'water',
-  'grass',
-  'short_grass',
-  'tall_grass',
-  'snow',
-  'fire',
-  'torch',
-]);
 
 function isStructureType(value: string): value is StructureType {
   return (STRUCTURE_TYPES as readonly string[]).includes(value);
@@ -132,7 +127,10 @@ export class BuildStructureSkill implements Skill<BuildStructureParams> {
   public readonly name: ActionType = 'build_structure';
   public readonly conflictGroups: readonly string[] = [CONFLICT_GROUP.BUILDING];
 
-  constructor(private readonly facade: MinecraftFacade) {}
+  constructor(
+    private readonly facade: MinecraftFacade,
+    private readonly rules: AntiGriefRules = new AntiGriefRules(),
+  ) {}
 
   public async execute(params: BuildStructureParams, ctx: ExecutionContext): Promise<SkillResult> {
     const structure = params.structure;
@@ -154,6 +152,12 @@ export class BuildStructureSkill implements Skill<BuildStructureParams> {
 
     const origin = floorPos(params.position);
     const material = normaliseBlockName(params.material ?? 'cobblestone');
+
+    // Dangerous materials (tnt, cactus, lava, ...) are never placed.
+    if (isDangerousBlock(material)) {
+      return failedResult(`I will not build with ${material.replace(/_/g, ' ')} - it is too dangerous.`, 0);
+    }
+
     const dimensions = params.dimensions ?? {};
     const planned = planStructure(structure, origin, dimensions);
     const plan = planned.slice(0, MAX_BUILD_BLOCKS);
@@ -195,7 +199,12 @@ export class BuildStructureSkill implements Skill<BuildStructureParams> {
       }
 
       let placed = 0;
+      /** Cells that already held the material - nothing to do there. */
+      let existing = 0;
+      /** Cells that could not be built in: something else is in the way. */
       let blocked = 0;
+      /** Consecutive placement failures, so a stuck run gives up. */
+      let consecutiveFailures = 0;
       for (const target of plan) {
         if (ctx.signal.aborted) {
           return {
@@ -206,12 +215,12 @@ export class BuildStructureSkill implements Skill<BuildStructureParams> {
           };
         }
 
-        const existing = this.facade.getBlockAt(target);
-        if (existing === material) {
-          placed += 1;
+        const skipped = this.skipCell(target, material);
+        if (skipped === 'existing') {
+          existing += 1;
           continue;
         }
-        if (existing !== null && !REPLACEABLE.has(existing)) {
+        if (skipped === 'blocked') {
           blocked += 1;
           continue;
         }
@@ -247,24 +256,27 @@ export class BuildStructureSkill implements Skill<BuildStructureParams> {
         }
         if (result.status === 'ok' && result.value) {
           placed += 1;
-          blocked = 0;
+          consecutiveFailures = 0;
           reportProgress(ctx, placed, plan.length, `Built ${placed}/${plan.length}`);
         } else {
-          blocked += 1;
+          consecutiveFailures += 1;
           // Something is in the way we cannot clear; keep going and report.
-          if (blocked > plan.length) break;
+          if (consecutiveFailures > plan.length) break;
         }
       }
 
-      const summary = `${structure.replace('_', ' ')}: placed ${placed} of ${plan.length} ${material}`;
-      if (placed >= plan.length) {
+      const skipped = existing + blocked;
+      const summary =
+        `${structure.replace('_', ' ')}: placed ${placed} of ${plan.length} ${material}` +
+        (skipped > 0 ? `, skipped ${skipped}` : '');
+      if (placed + existing >= plan.length) {
         return { ok: true, detail: `Finished. ${summary}.`, count: placed };
       }
       return {
         ok: false,
         detail: `${summary}. Something was already in the way.`,
         count: placed,
-        remaining: Math.max(0, plan.length - placed),
+        remaining: Math.max(0, plan.length - placed - existing),
       };
     } catch (error) {
       if (isCancellation(error)) {
@@ -273,8 +285,28 @@ export class BuildStructureSkill implements Skill<BuildStructureParams> {
       return failedResult(`Building failed: ${describeError(error)}`, 0, plan.length);
     }
   }
+
+  /**
+   * Decides what to do with one cell of the structure.
+   *
+   * `existing` - the material is already there, nothing to do.
+   * `blocked`  - something else is in the way, or somebody is standing there.
+   * `build`    - the cell can be built in.
+   */
+  private skipCell(target: BlockPos, material: string): 'existing' | 'blocked' | 'build' {
+    const current = this.facade.getBlockAt(target);
+    if (current === material) return 'existing';
+    // Anti-grief: never overwrite what is already there.
+    if (!this.rules.canPlaceBlock(target, current).allowed) return 'blocked';
+    // A block materialised inside a player would trap (or suffocate) them.
+    if (entityOccupiesCell(this.facade, target) !== null) return 'blocked';
+    return 'build';
+  }
 }
 
-export function createBuildStructureSkill(facade: MinecraftFacade): BuildStructureSkill {
-  return new BuildStructureSkill(facade);
+export function createBuildStructureSkill(
+  facade: MinecraftFacade,
+  rules?: AntiGriefRules,
+): BuildStructureSkill {
+  return new BuildStructureSkill(facade, rules);
 }

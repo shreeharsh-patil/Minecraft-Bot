@@ -100,6 +100,15 @@ export class PickupItemsSkill implements Skill<PickupItemsParams> {
         picked += gained;
 
         if (gained === 0) {
+          // A full inventory is not a navigation problem: nothing came in
+          // because there was nowhere to put it.
+          if (this.facade.freeSlots() === 0) {
+            return failedResult(
+              `My inventory is full - I cannot pick up any more ${label}.`,
+              picked,
+              wanted ?? undefined,
+            );
+          }
           // Either unreachable or the server has not handed the stack over yet;
           // remember the spot so we move on rather than retrying it blindly.
           skipped.add(posKey(candidate.position));
@@ -137,6 +146,9 @@ export class PickupItemsSkill implements Skill<PickupItemsParams> {
         // Nothing was collected, so this is a failure either way: `ok:
         // sawCandidate` would report success for a bot still standing next to
         // the stack it failed to pick up.
+        if (this.facade.freeSlots() === 0) {
+          return failedResult(`My inventory is full - I cannot pick up any more ${label}.`);
+        }
         return failedResult(
           sawCandidate
             ? `I found dropped ${label} but could not pick it up.`

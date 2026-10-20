@@ -15,8 +15,10 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       signal?.removeEventListener('abort', onAbort);
       resolve();
     }, ms);
-    // Do not keep the event loop alive purely for a sleep.
-    timer.unref?.();
+    // The timer stays REFERENCED on purpose. An unref'd timer does not keep
+    // the event loop alive, so a process that was only waiting on a sleep (the
+    // reconnect backoff is exactly that) exited silently with code 0 - the
+    // bot simply never came back after a server restart.
     function onAbort(): void {
       clearTimeout(timer);
       reject(new AbortedError());
@@ -75,7 +77,9 @@ export async function withTimeout<T>(
   const timer = setTimeout(() => {
     timeout.reject(new Error(`${description} timed out after ${timeoutMs}ms`));
   }, timeoutMs);
-  timer.unref?.();
+  // Referenced on purpose: if the awaited work never settles and nothing else
+  // holds the event loop, an unref'd timer would let the process exit silently
+  // instead of reporting the timeout.
   const onAbort = (): void => timeout.reject(new AbortedError());
   signal?.addEventListener('abort', onAbort, { once: true });
 

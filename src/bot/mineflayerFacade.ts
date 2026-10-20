@@ -72,6 +72,8 @@ function droppedItemName(entity: Entity): string {
 export class MineflayerFacade implements MinecraftFacade {
   private readonly bot: MineflayerBot;
   private readonly logger: Logger;
+  /** The last position the bot was actually at (never the world origin). */
+  private lastPosition: Vec3Like = { x: 0, y: 0, z: 0 };
 
   constructor(bot: MineflayerBot, logger: Logger) {
     this.bot = bot;
@@ -93,7 +95,14 @@ export class MineflayerFacade implements MinecraftFacade {
 
   getPosition(): Vec3Like {
     const p = this.bot.entity?.position;
-    return p ? { x: p.x, y: p.y, z: p.z } : { x: 0, y: 0, z: 0 };
+    if (!p) {
+      // Not spawned (or already disconnected): report the LAST known position
+      // instead of the world origin, which would send the planner (and the
+      // player) to 0,0,0.
+      return { ...this.lastPosition };
+    }
+    this.lastPosition = { x: p.x, y: p.y, z: p.z };
+    return { ...this.lastPosition };
   }
 
   getHealth(): { current: number; max: number } {
@@ -109,12 +118,15 @@ export class MineflayerFacade implements MinecraftFacade {
   }
 
   getTimeOfDay(): TimeOfDay {
-    switch (this.bot.time?.timeOfDay) {
-      case 0: return 'day';
-      case 1: return 'dusk';
-      case 2: return 'night';
-      default: return 'unknown';
-    }
+    // `bot.time.timeOfDay` is a TICK count (0..23999), not an enum: 0-11999 is
+    // day, 12000-13999 dusk, 14000-22999 night, 23000-23999 dawn.
+    const ticks = this.bot.time?.timeOfDay;
+    if (typeof ticks !== 'number' || !Number.isFinite(ticks)) return 'unknown';
+    const time = ((ticks % 24000) + 24000) % 24000;
+    if (time < 12_000) return 'day';
+    if (time < 14_000) return 'dusk';
+    if (time < 23_000) return 'night';
+    return 'dawn';
   }
 
   getEntityId(): number | undefined {
@@ -133,9 +145,19 @@ export class MineflayerFacade implements MinecraftFacade {
   }
 
   findNearestBlock(name: string, maxDistance: number): BlockRef | null {
-    const found = this.bot.findBlock({ matching: (b) => b?.name === name, maxDistance });
-    if (!found) return null;
-    return this.toBlockRef(found.name, found.position);
+    try {
+      const found = this.bot.findBlock({ matching: (b) => b?.name === name, maxDistance });
+      if (!found) return null;
+      return this.toBlockRef(found.name, found.position);
+    } catch (error) {
+      // findBlock dereferences bot.entity: it throws when the bot is not
+      // spawned, where its siblings findBlocks/scanNearbyBlocks return empty.
+      this.logger.debug('nearest block lookup failed', {
+        name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   findBlocks(name: string, maxDistance: number, limit = 16): BlockRef[] {
@@ -169,9 +191,13 @@ export class MineflayerFacade implements MinecraftFacade {
       for (const pos of positions) {
         const block = this.bot.blockAt(pos);
         if (!block) continue;
+        const candidate = this.toBlockRef(block.name, block.position);
+        // findBlocks returns nearest-first, so keep the CLOSEST block of each
+        // name: overwriting kept the farthest one, which fed wrong distances
+        // to the planner.
         const existing = byName.get(block.name);
-        if (existing && existing.distance <= 0) continue;
-        byName.set(block.name, this.toBlockRef(block.name, block.position));
+        if (existing && existing.distance <= candidate.distance) continue;
+        byName.set(block.name, candidate);
       }
       return [...byName.values()].sort((a, b) => a.distance - b.distance);
     } catch (error) {
@@ -201,6 +227,10 @@ export class MineflayerFacade implements MinecraftFacade {
       const d = distance3(this.getPosition(), entity.position);
       if (d > maxDistance) continue;
       const name = this.resolvePlayerName(entity);
+      // Until the tab list arrives, a player entity has no username and its
+      // `name` is the literal "player" - reporting that as a player name
+      // made the safe-mode monitor think nobody was online.
+      if (name === null) continue;
       out.push({
         name,
         distance: d,
@@ -214,10 +244,17 @@ export class MineflayerFacade implements MinecraftFacade {
   /**
    * Mineflayer's `Player` record has no position and the username lives on the
    * matching entity's username, so resolve through the entity id.
+   *
+   * Returns null when the name is genuinely unknown: the fallback `name` of a
+   * player entity is the literal "player", which is worse than no name at all.
    */
-  private resolvePlayerName(entity: Entity): string {
+  private resolvePlayerName(entity: Entity): string | null {
     if (entity.username !== undefined && entity.username !== null) return entity.username;
-    return entity.name ?? entity.displayName ?? 'unknown';
+    const fallback = entity.displayName;
+    if (typeof fallback === 'string' && fallback.length > 0 && fallback !== 'player') {
+      return fallback;
+    }
+    return null;
   }
 
   /** Set by the bot so the facade can label players as authorized. */
@@ -231,11 +268,20 @@ export class MineflayerFacade implements MinecraftFacade {
       if (!entity.position) continue;
       const d = distance3(this.getPosition(), entity.position);
       if (d > maxDistance) continue;
+      const isPlayer = entity.type === 'player';
+      const resolvedName = isPlayer ? this.resolvePlayerName(entity) : (entity.name ?? 'unknown');
+      // A player whose name is not known yet is skipped rather than reported
+      // under the literal name "player".
+      if (resolvedName === null) continue;
       out.push({
-        name: entity.type === 'player' ? this.resolvePlayerName(entity) : (entity.name ?? 'unknown'),
-        type: categorize(entity.name ?? 'unknown'),
+        name: resolvedName,
+        // A PLAYER is never a mob, whatever their name says: re-categorising
+        // by name turned a player called "Slime" into a hostile mob.
+        type: isPlayer ? 'player' : categorize(entity.name ?? 'unknown'),
         distance: d,
         position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+        // The entity id is required to actually damage a mob (attack needs it).
+        id: entity.id,
         ...(typeof entity.health === 'number' ? { health: entity.health } : {}),
       });
     }
@@ -247,7 +293,8 @@ export class MineflayerFacade implements MinecraftFacade {
     const selfId = this.getEntityId();
     for (const entity of Object.values(this.bot.entities ?? {})) {
       if (entity.type !== 'player' || entity.id === selfId || !entity.position) continue;
-      if (this.resolvePlayerName(entity).toLowerCase() !== target) continue;
+      const resolved = this.resolvePlayerName(entity);
+      if (resolved === null || resolved.toLowerCase() !== target) continue;
       return {
         name: target,
         distance: distance3(this.getPosition(), entity.position),
@@ -299,7 +346,12 @@ export class MineflayerFacade implements MinecraftFacade {
   }
 
   countItem(item: string): number {
-    return this.bot.inventory.count(item, null);
+    // `Window.count()` does `parseInt(itemType, 10)`: a NAME becomes NaN and
+    // never matches an item id, so the count was silently always 0. Resolve
+    // the name to its numeric id first.
+    const id = this.itemId(item);
+    if (id === null) return 0;
+    return this.bot.inventory.count(id, null);
   }
 
   heldItem(): string | null {
@@ -308,9 +360,14 @@ export class MineflayerFacade implements MinecraftFacade {
   }
 
   freeSlots(): number | null {
-    // prismarine-inventory exposes freeSpace on the bot's main inventory window.
-    const inv = this.bot.inventory as unknown as { freeSpace?: () => number };
-    return typeof inv.freeSpace === 'function' ? inv.freeSpace() : null;
+    // prismarine-windows exposes `emptySlotCount()`; there is no `freeSpace()`.
+    const inv = this.bot.inventory as unknown as {
+      emptySlotCount?: () => number;
+      freeSpace?: () => number;
+    };
+    if (typeof inv.emptySlotCount === 'function') return inv.emptySlotCount();
+    if (typeof inv.freeSpace === 'function') return inv.freeSpace();
+    return null;
   }
 
   /**
@@ -351,6 +408,16 @@ export class MineflayerFacade implements MinecraftFacade {
       if (distance <= arriveDistance + 1) return { status: 'arrived', distance };
       return { status: 'blocked', reason: 'did not reach target', stuckCount: 0 };
     } catch (error) {
+      // The pathfinder keeps walking towards its goal after a timeout or a
+      // cancellation: it re-applies the control states on every physics tick.
+      // Stop it explicitly, or the bot walks off on its own.
+      try {
+        pathfinder.stop();
+      } catch (stopError) {
+        this.logger.debug('pathfinder stop failed', {
+          error: stopError instanceof Error ? stopError.message : String(stopError),
+        });
+      }
       this.bot.clearControlStates();
       if (options.signal?.aborted || error instanceof AbortedError) {
         return { status: 'cancelled' };
@@ -436,22 +503,41 @@ export class MineflayerFacade implements MinecraftFacade {
     face: 'top' | 'side' | 'front' | 'auto' = 'auto',
   ): Promise<boolean> {
     try {
-      const reference = this.bot.blockAt(asVec3(position));
-      if (!reference) return false;
       if (this.itemId(blockName) === null) {
         this.logger.warn('unknown block name', { blockName });
         return false;
       }
-      // placeBlock(referenceBlock, faceVector): the vector points off the
-      // reference block toward where the new block should appear.
-      const vectors: Record<string, Vec3> = {
-        top: new Vec3(0, 1, 0),
-        side: new Vec3(1, 0, 0),
-        front: new Vec3(0, 0, 1),
-      };
-      const faceVector = face === 'auto' ? new Vec3(0, 1, 0) : (vectors[face] ?? new Vec3(0, 1, 0));
-      await this.bot.placeBlock(reference, faceVector);
-      return true;
+      // `bot.placeBlock(reference, faceVector)` puts the block at
+      // reference + faceVector, so the CONTRACT "place at `position`" needs a
+      // reference block ADJACENT to the target. Using the target itself as the
+      // reference put every block one level above where it was asked for
+      // (and inside the bot's own body when building at its feet).
+      const target = { x: position.x, y: position.y, z: position.z };
+      const candidates: Array<{ reference: Vec3Like; face: Vec3 }> = [];
+      if (face === 'auto' || face === 'top') {
+        candidates.push({ reference: { x: target.x, y: target.y - 1, z: target.z }, face: new Vec3(0, 1, 0) });
+      }
+      if (face === 'auto' || face === 'side') {
+        candidates.push({ reference: { x: target.x + 1, y: target.y, z: target.z }, face: new Vec3(-1, 0, 0) });
+        candidates.push({ reference: { x: target.x - 1, y: target.y, z: target.z }, face: new Vec3(1, 0, 0) });
+      }
+      if (face === 'auto' || face === 'front') {
+        candidates.push({ reference: { x: target.x, y: target.y, z: target.z + 1 }, face: new Vec3(0, 0, -1) });
+        candidates.push({ reference: { x: target.x, y: target.y, z: target.z - 1 }, face: new Vec3(0, 0, 1) });
+      }
+
+      for (const candidate of candidates) {
+        const reference = this.bot.blockAt(asVec3(candidate.reference));
+        if (!reference) continue;
+        await this.bot.placeBlock(reference, candidate.face);
+        return true;
+      }
+      this.logger.debug('no reference block to place against', {
+        position,
+        blockName,
+        face,
+      });
+      return false;
     } catch (error) {
       this.logger.debug('placeBlock failed', {
         position,
@@ -528,14 +614,19 @@ export class MineflayerFacade implements MinecraftFacade {
       if (itemType === null) return 0;
       const amount = Math.min(count, this.countItem(item));
       if (amount <= 0) return 0;
-      await this.bot.transfer(({
+      await this.bot.transfer({
         window: window as never,
         itemType,
         metadata: this.itemMeta(item),
         count: amount,
-        sourceStart: 9,
-        sourceEnd: 35,
-      }) as never);
+        // Player inventory -> chest. `bot.transfer` REQUIRES a destination
+        // range: without destStart it threw "destination full" and every
+        // deposit failed.
+        sourceStart: window.inventoryStart ?? 9,
+        sourceEnd: window.inventoryEnd ?? 36,
+        destStart: 0,
+        destEnd: window.inventoryStart ?? 27,
+      });
       return amount;
     } catch (error) {
       this.logger.warn('deposit failed', {
@@ -556,14 +647,17 @@ export class MineflayerFacade implements MinecraftFacade {
       if (itemType === null) return 0;
       const amount = Math.min(count, countWindowItem(window, item));
       if (amount <= 0) return 0;
-      await this.bot.transfer(({
+      await this.bot.transfer({
         window: window as never,
         itemType,
         metadata: this.itemMeta(item),
         count: amount,
+        // Chest -> player inventory.
         sourceStart: 0,
-        sourceEnd: 26,
-      }) as never);
+        sourceEnd: window.inventoryStart ?? 27,
+        destStart: window.inventoryStart ?? 27,
+        destEnd: window.inventoryEnd ?? 63,
+      });
       return amount;
     } catch (error) {
       this.logger.warn('withdraw failed', {
@@ -618,11 +712,23 @@ interface PathfinderLike {
 interface WindowLike {
   close(): void;
   items(): Array<{ name: string; count: number }>;
+  /** Slots of the container itself (a chest has 27). */
+  containerItems?(): Array<{ name: string; count: number }>;
+  /** First slot of the player's inventory inside this window. */
+  inventoryStart?: number;
+  /** Slot after the player's inventory inside this window. */
+  inventoryEnd?: number;
 }
 
+/**
+ * Counts an item inside the CONTAINER (the chest), not in the player's own
+ * inventory region of the window: `window.items()` is the backpack, which is
+ * why a withdraw used to compute the amount from the bot's own pockets.
+ */
 function countWindowItem(window: WindowLike, item: string): number {
+  const slots = window.containerItems ? window.containerItems() : window.items();
   let total = 0;
-  for (const slot of window.items()) {
+  for (const slot of slots) {
     if (slot.name === item) total += slot.count;
   }
   return total;

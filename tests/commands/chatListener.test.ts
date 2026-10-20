@@ -272,14 +272,21 @@ describe('ChatListener.route - deterministic commands never reach the AI', () =>
     }
   });
 
-  it('falls back to the AI when a deterministic command is malformed', () => {
-    // Documented behaviour: a typo should still get help rather than silence.
+  it('answers a malformed deterministic command with a usage error', () => {
+    // A typo must be a usage error, not a request for the planner: the
+    // player gets told how to use the command instead of the bot guessing
+    // what "!goto 1 2" was supposed to mean.
     const route = h.listener.route(message('Alice', '!goto 1 2'));
-    expect(route).toEqual({ kind: 'ai', text: '!goto 1 2' });
+    expect(route.kind).toBe('usage');
+    expect(route).toMatchObject({ message: expect.stringContaining('!goto') });
   });
 
-  it('routes an unknown !command to the AI', () => {
-    expect(h.listener.route(message('Alice', '!teleport')).kind).toBe('ai');
+  it('routes an unknown !command to the local handler', () => {
+    expect(h.listener.route(message('Alice', '!teleport'))).toEqual({
+      kind: 'local',
+      name: 'teleport',
+      args: [],
+    });
   });
 });
 describe('ChatListener.route - authorization (the security boundary)', () => {

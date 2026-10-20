@@ -60,6 +60,9 @@ function key(p: Vec3Like): string {
 /** How close the bot must get before Minecraft hands it a dropped stack. */
 const PICKUP_RADIUS = 1;
 
+/** A full inventory stack holds this many items. */
+const MAX_STACK_SIZE = 64;
+
 export class FakeMinecraftFacade implements MinecraftFacade {
   public readonly username = 'TestBot';
   public readonly dimension = 'overworld';
@@ -168,6 +171,14 @@ export class FakeMinecraftFacade implements MinecraftFacade {
   public removeEntity(entityName: string): void {
     const index = this.entities.findIndex((e) => e.name === entityName);
     if (index >= 0) this.entities.splice(index, 1);
+  }
+
+  /** Moves an entity, e.g. a mob that walked away mid-fight. */
+  public moveEntity(entityName: string, to: Vec3Like): void {
+    const existing = this.entities.find((e) => e.name === entityName);
+    if (!existing) return;
+    existing.position = { ...to };
+    existing.distance = distance3(this.position, existing.position);
   }
 
   /** Chest contents, for assertions. */
@@ -519,7 +530,10 @@ export class FakeMinecraftFacade implements MinecraftFacade {
 
     const have = contents.get(item) ?? 0;
     if (have <= 0) return Promise.resolve(0);
-    const room = this.inventoryFull ? 0 : Math.max(0, this.slots - this.inventoryMap.size);
+    // A free slot holds a whole stack, so the room is a stack budget.
+    const freeSlots = this.inventoryFull ? 0 : Math.max(0, this.slots - this.inventoryMap.size);
+    const usableSlots = freeSlots + (this.inventoryMap.has(item) ? 0 : 1);
+    const room = usableSlots * MAX_STACK_SIZE;
     const moved = Math.min(count, have, room);
     if (moved <= 0) return Promise.resolve(0);
 

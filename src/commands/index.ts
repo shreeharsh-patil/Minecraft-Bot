@@ -93,7 +93,7 @@ export class LocalCommands {
   }
 
   private async status(owner: string): Promise<void> {
-    const { facade, tasks, responder } = this.deps;
+    const { facade, tasks, responder, auth } = this.deps;
     const health = facade.getHealth();
     const food = facade.getHunger();
     await responder.send(
@@ -107,6 +107,9 @@ export class LocalCommands {
         position: facade.getPosition(),
         activeTasks: tasks.list(),
         brain: this.deps.providerStats(),
+        // The rate-limit budget left for this player, so a player who is
+        // being throttled can see why their commands stopped working.
+        remainingCommands: auth.remainingQuota(owner),
       }),
     );
   }

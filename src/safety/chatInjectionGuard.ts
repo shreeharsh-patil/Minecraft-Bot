@@ -38,9 +38,13 @@ const SENSITIVE_REQUEST_PATTERNS: readonly RegExp[] = [
   // Credential nouns, optionally joined to a qualifier by any separator, so
   // both prose ("your api key") and env-var names ("GROQ_API_KEY", "x-api-key")
   // are caught. No leading \b: inside an identifier `_` is a word character.
-  /(?:api|access|secret|private|client|refresh|minecraft|msa)[\s_.-]*(?:key|keys|token|tokens|secret)/i,
+  /(?:api|access|secret|private|client|refresh|auth|minecraft|msa)[\s_.-]*(?:key|keys|token|tokens|secret)/i,
   /[\s_.-]*(?:api|access|secret|private|client|refresh)[\s_.-]*(?:key|keys)\b/i,
-  /\b(?:key|keys|token|tokens|secret|password|passwd)\b/i,
+  // A bare credential noun ("key", "token", "secret") is ordinary English:
+  // "find the trial key in the vault" and "how many tokens do I have" are
+  // gameplay, not a request for a credential. Such a noun only counts when
+  // it is bound to a possessor ("your token") or to a known qualifier.
+  /\b(?:your|my|our)\s+(?:(?:api|access|secret|private|client|refresh|auth|session|bot|admin|account)\s+)?(?:key|token|secret|credential)s?\b/i,
   /\b(?:env|environment)[\s_.-]*(?:var|vars|variables)\b/i,
   /\baccess\s+token\b/i,
   /\brefresh\s+token\b/i,
@@ -53,9 +57,25 @@ const SENSITIVE_REQUEST_PATTERNS: readonly RegExp[] = [
   /\b(?:shell|bash|cmd(?:\.exe)?|powershell|terminal|console)\b/i,
   /\b(?:exec|execSync|spawn|child_process|eval)\s*\(/i,
   /\b(?:rcon|minecraft\s+server\s+command|op\s+the\s+player|make\s+me\s+op)\b/i,
-  /\bpassword\b/i,
+  /\b(?:password|passwd|passphrase)\b/i,
   /\bconfiguration\s+file\b/i,
 ];
+
+/**
+ * Removes the characters that are invisible in the chat client: C0 control
+ * characters and zero-width/format characters. They can be used to hide an
+ * instruction from a human reviewer while the model still reads it, so they
+ * are taken out before anything is matched against the text.
+ *
+ * Control characters become a space (they separate words); zero-width
+ * characters are removed outright, so a padded instruction is matched as the
+ * plain instruction it is.
+ */
+function stripInvisible(text: string): string {
+  // eslint-disable-next-line no-control-regex -- stripping control chars is the point
+  const withoutControls = text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ');
+  return withoutControls.replace(/[\u00AD\u200B-\u200F\u2028\u2029\u2060\uFEFF]/g, '');
+}
 
 export interface SanitizedChat {
   /** Text safe to embed in a prompt as data. */
@@ -75,9 +95,9 @@ export interface SanitizedChat {
 export function sanitizeChatMessage(raw: string, maxLength = 500): SanitizedChat {
   const flags: string[] = [];
 
-  // Control characters can be used to hide instructions from human review.
-  // eslint-disable-next-line no-control-regex -- stripping control chars is the point
-  let text = raw.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ');
+  // Invisible characters (control characters, zero-width padding) are taken
+  // out first, so a hidden instruction is matched as the plain text it is.
+  let text = stripInvisible(raw);
 
   let suspicious = false;
   for (const pattern of INJECTION_PATTERNS) {
@@ -140,11 +160,13 @@ export function safeChatReply(message: string, maxLength = 240): string {
  * Returns null when clean, otherwise a reason string.
  */
 export function detectInjectedIntent(text: string): string | null {
+  // Invisible padding must not hide a marker from this scan either.
+  const cleaned = stripInvisible(text);
   for (const pattern of INJECTION_PATTERNS) {
-    if (pattern.test(text)) return 'model output contained prompt-injection markers';
+    if (pattern.test(cleaned)) return 'model output contained prompt-injection markers';
   }
   for (const pattern of SENSITIVE_REQUEST_PATTERNS) {
-    if (pattern.test(text)) return 'model output attempted to access protected information';
+    if (pattern.test(cleaned)) return 'model output attempted to access protected information';
   }
   return null;
 }

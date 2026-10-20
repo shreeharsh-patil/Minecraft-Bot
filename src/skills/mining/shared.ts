@@ -1,6 +1,8 @@
 import { BLOCK_TOOL, SOFT_BLOCKS } from '../../config/constants.js';
 import type { BlockRef, MinecraftFacade } from '../../types/facade.js';
 import type { ExecutionContext } from '../../types/task.js';
+import { AntiGriefRules } from '../../safety/antiGrief.js';
+import { DEFAULT_MAX_MINE } from '../../safety/actionLimits.js';
 import { createLogger } from '../../utils/logger.js';
 import {
   ACTION_TIMEOUT_MS,
@@ -16,7 +18,7 @@ import {
 const log = createLogger({ level: 'info' }).child({ layer: 'skills', skill: 'mining' });
 
 /** Absolute ceiling for one mining task, whatever the model asked for. */
-export const MAX_BLOCKS_PER_TASK = 512;
+export const MAX_BLOCKS_PER_TASK = DEFAULT_MAX_MINE;
 /** How far to look for the next block of the requested type. */
 export const SEARCH_DISTANCE = 24;
 /** Consecutive per-block failures tolerated before the task gives up. */
@@ -41,6 +43,8 @@ export interface MineRunOptions {
   /** Noun used in messages, e.g. "oak logs". */
   label: string;
   searchDistance?: number;
+  /** The anti-grief rules that decide which blocks may be broken. */
+  rules?: AntiGriefRules;
 }
 
 type ToolOutcome =
@@ -60,11 +64,14 @@ export async function runMining(
   options: MineRunOptions,
 ): Promise<MineRunResult> {
   const searchDistance = options.searchDistance ?? SEARCH_DISTANCE;
+  const rules = options.rules ?? new AntiGriefRules();
   const tried = new Set<string>();
   let mined = 0;
   let failures = 0;
   let cancelled = false;
   let reason: string | null = null;
+  /** Why the last block was left alone, if any. */
+  let refusal: string | null = null;
 
   while (mined < options.count) {
     if (ctx.signal.aborted) {
@@ -74,11 +81,25 @@ export async function runMining(
 
     const target = pickNextBlock(facade, options.names, searchDistance, tried);
     if (!target) {
-      // A specific failure ("no pickaxe") is more useful than "ran out".
-      reason ??= `I ran out of ${options.label} within ${searchDistance} blocks.`;
+      // A specific failure ("no pickaxe", "that chest is not mine to break")
+      // is more useful than "ran out".
+      reason ??= refusal ?? `I ran out of ${options.label} within ${searchDistance} blocks.`;
       break;
     }
     tried.add(posKey(target.position));
+
+    // Anti-grief: a block a player placed (a chest, a farm, a plank wall)
+    // is never broken, even when the model asked for that exact block.
+    const grief = rules.canBreakBlock(target.name, target.position);
+    if (!grief.allowed) {
+      refusal ??= grief.reason ?? `I won't break that ${target.name}.`;
+      log.debug('refusing to break block', {
+        block: target.name,
+        at: formatPos(target.position),
+        reason: grief.reason,
+      });
+      continue;
+    }
 
     const arrival = await approachBlock(facade, ctx, target.position, `Approaching ${target.name}`);
     if (arrival.status === 'cancelled') {

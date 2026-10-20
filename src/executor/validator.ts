@@ -4,10 +4,22 @@
  * Nothing reaches a skill without passing `validateAction`. The validator is
  * deliberately strict and schema-driven rather than a permissive cast, because
  * this is the boundary between untrusted model output and real world actions.
+ *
+ * Human-written names ("Oak Logs", "Iron-Ingot") are canonicalised into the
+ * strict Minecraft shape rather than rejected: the canonical form is checked
+ * against the same strict pattern, so this can only make a legitimate request
+ * expressible - it can never let a dangerous one through.
  */
 import { isActionType, type ActionType, type BotAction } from '../types/actions.js';
 import type { Vec3Like } from '../types/world.js';
-import { MAX_PLANNED_ACTIONS } from '../safety/actionLimits.js';
+import {
+  DEFAULT_MAX_MINE,
+  DEFAULT_MAX_WAIT_MS,
+  MAX_DEFEND_DURATION_MS,
+  MAX_DROP_COUNT,
+  MAX_FOLLOW_DURATION_MS,
+  MAX_PLANNED_ACTIONS,
+} from '../safety/actionLimits.js';
 import { detectInjectedIntent } from '../safety/chatInjectionGuard.js';
 
 export interface ValidationResult {
@@ -54,8 +66,39 @@ function isPlayerName(value: unknown): value is string {
  */
 const ITEM_NAME_PATTERN = /^[a-z0-9_]{1,64}$/;
 
-function isItemName(value: unknown): value is string {
-  return typeof value === 'string' && ITEM_NAME_PATTERN.test(value);
+/**
+ * The shape a *human* may write an item name in: "Oak Logs", "Iron-Ingot".
+ * Anything else - a slash, a semicolon, a path fragment - is rejected
+ * outright rather than cleaned up.
+ */
+const RAW_ITEM_NAME_PATTERN = /^[A-Za-z0-9 _-]{1,64}$/;
+
+/**
+ * Turns a human-written item name into the canonical Minecraft form:
+ * "Oak Logs" -> "oak_logs", "Iron-Ingot" -> "iron_ingot".
+ *
+ * The result is re-checked against `ITEM_NAME_PATTERN`, so only the strict
+ * shape ever reaches a skill: the normalisation can never widen what the
+ * validator accepts, it only makes the legitimate shapes expressible.
+ */
+function normaliseItemName(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  if (!RAW_ITEM_NAME_PATTERN.test(value)) return undefined;
+  const normalised = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return ITEM_NAME_PATTERN.test(normalised) ? normalised : undefined;
+}
+
+/**
+ * Named locations ("home", "the mine"): letters, digits, spaces and dashes.
+ * A location is only ever used to look something up, never to build a path.
+ */
+const LOCATION_PATTERN = /^[A-Za-z0-9 _-]{1,32}$/;
+
+function normaliseLocation(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  if (!LOCATION_PATTERN.test(value)) return undefined;
+  const normalised = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return normalised.length > 0 ? normalised : undefined;
 }
 
 /** Optional bounded note text. Control characters are stripped by key, not by regex. */
@@ -79,6 +122,9 @@ function sanitizeChatText(value: unknown): string | undefined {
   // eslint-disable-next-line no-control-regex -- stripping control chars is the point
   const trimmed = value.replace(/[\u0000-\u001F\u007F]/g, '').trim();
   if (trimmed.length === 0 || trimmed.length > SAY_MAX_CHARS) return undefined;
+  // A leading slash is a SERVER COMMAND, not chat: "/op @a" or "/login <pw>"
+  // would be executed by the server the moment the bot sends it.
+  if (trimmed.startsWith('/') || trimmed.startsWith('\\')) return undefined;
   if (detectInjectedIntent(trimmed)) return undefined;
   return trimmed;
 }
@@ -87,6 +133,27 @@ function positiveInt(value: unknown, max: number): number | undefined {
   if (!isFiniteNumber(value)) return undefined;
   if (value <= 0) return undefined;
   return Math.min(Math.floor(value), max);
+}
+
+/**
+ * A positive integer that must not exceed `max`.
+ *
+ * Unlike `positiveInt` this REJECTS an oversized value instead of clamping
+ * it: when the ceiling is a safety limit, quietly shrinking the request
+ * would hide the fact that too much was asked for - and would make the
+ * validator accept something the executor later refuses.
+ */
+function boundedPositiveInt(value: unknown, max: number): number | undefined {
+  if (!isFiniteNumber(value)) return undefined;
+  if (value <= 0 || value > max) return undefined;
+  return Math.floor(value);
+}
+
+/** Like `boundedPositiveInt`, but zero is allowed (a no-op wait). */
+function boundedNonNegativeInt(value: unknown, max: number): number | undefined {
+  if (!isFiniteNumber(value)) return undefined;
+  if (value < 0 || value > max) return undefined;
+  return Math.floor(value);
 }
 
 function optionalDistance(value: unknown, max = 64): number | undefined {
@@ -124,7 +191,6 @@ export function validateAction(raw: unknown): ValidationResult {
         return { valid: false, reason: `${type} requires a valid "player" name` };
       }
       const maxDistance = optionalDistance(raw['maxDistance'] ?? raw['distance'] ?? raw['radius']);
-      const durationMs = optionalDistance(raw['durationMs'], 600_000);
       if (type === 'move_to_player') {
         return {
           valid: true,
@@ -136,14 +202,27 @@ export function validateAction(raw: unknown): ValidationResult {
         };
       }
       if (type === 'follow_player') {
+        const durationMs = raw['durationMs'] === undefined
+          ? undefined
+          : boundedPositiveInt(raw['durationMs'], MAX_FOLLOW_DURATION_MS);
+        if (raw['durationMs'] !== undefined && durationMs === undefined) {
+          return { valid: false, reason: 'follow_player duration must be a positive number of milliseconds' };
+        }
         return {
           valid: true,
           action: {
             ...base(type, note),
             player,
             ...(maxDistance !== undefined ? { distance: maxDistance } : {}),
+            ...(durationMs !== undefined ? { durationMs } : {}),
           },
         };
+      }
+      const durationMs = raw['durationMs'] === undefined
+        ? undefined
+        : boundedPositiveInt(raw['durationMs'], MAX_DEFEND_DURATION_MS);
+      if (raw['durationMs'] !== undefined && durationMs === undefined) {
+        return { valid: false, reason: 'defend_player duration must be a positive number of milliseconds' };
       }
       return {
         valid: true,
@@ -169,11 +248,11 @@ export function validateAction(raw: unknown): ValidationResult {
         const maxDistance = optionalDistance(raw['maxDistance']);
         return {
           valid: true,
-          action: { ...base, type, position, ...(maxDistance !== undefined ? { maxDistance } : {}) },
+          action: { ...base(type, note), position, ...(maxDistance !== undefined ? { maxDistance } : {}) },
         };
       }
-      const blockName = raw['blockName'];
-      if (!isItemName(blockName)) {
+      const blockName = normaliseItemName(raw['blockName']);
+      if (blockName === undefined) {
         return { valid: false, reason: 'place_block requires a valid "blockName"' };
       }
       const faceRaw = raw['face'];
@@ -181,32 +260,32 @@ export function validateAction(raw: unknown): ValidationResult {
         faceRaw === 'top' || faceRaw === 'side' || faceRaw === 'front' || faceRaw === 'auto'
           ? faceRaw
           : 'auto';
-      return { valid: true, action: { ...base, type, position, blockName, face } };
+      return { valid: true, action: { ...base(type, note), position, blockName, face } };
     }
 
     case 'mine_block': {
-      const blockName = raw['blockName'];
-      if (!isItemName(blockName)) {
+      const blockName = normaliseItemName(raw['blockName']);
+      if (blockName === undefined) {
         return { valid: false, reason: 'mine_block requires a valid "blockName"' };
       }
-      const count = positiveInt(raw['count'], 10_000);
+      const count = positiveInt(raw['count'], DEFAULT_MAX_MINE);
       if (count === undefined) {
         return { valid: false, reason: 'mine_block requires a positive "count"' };
       }
-      return { valid: true, action: { ...base, type, blockName, count } };
+      return { valid: true, action: { ...base(type, note), blockName, count } };
     }
 
     case 'collect_resource': {
-      const resource = raw['resource'];
-      if (!isItemName(resource)) {
+      const resource = normaliseItemName(raw['resource']);
+      if (resource === undefined) {
         return { valid: false, reason: 'collect_resource requires a valid "resource" name' };
       }
-      const count = positiveInt(raw['count'], 10_000);
+      const count = positiveInt(raw['count'], DEFAULT_MAX_MINE);
       if (count === undefined) {
         return { valid: false, reason: 'collect_resource requires a positive "count"' };
       }
-      const from = raw['from'];
-      if (from !== undefined && (typeof from !== 'string' || from.length > 32)) {
+      const from = raw['from'] === undefined ? undefined : normaliseLocation(raw['from']);
+      if (raw['from'] !== undefined && from === undefined) {
         return { valid: false, reason: 'invalid "from" location' };
       }
       return {
@@ -215,29 +294,32 @@ export function validateAction(raw: unknown): ValidationResult {
           ...base(type, note),
           resource,
           count,
-          ...(from !== undefined ? { from: from } : {}),
+          ...(from !== undefined ? { from } : {}),
         },
       };
     }
 case 'deposit_items':
     case 'withdraw_items': {
-      const item = raw['item'];
-      if (item !== undefined && !isItemName(item)) {
+      const item = raw['item'] === undefined ? undefined : normaliseItemName(raw['item']);
+      if (raw['item'] !== undefined && item === undefined) {
         return { valid: false, reason: `${type} "item" must be a valid item name` };
       }
-      const location = raw['location'];
-      if (location !== undefined && (typeof location !== 'string' || location.length > 32)) {
+      const location = raw['location'] === undefined ? undefined : normaliseLocation(raw['location']);
+      if (raw['location'] !== undefined && location === undefined) {
         return { valid: false, reason: 'invalid chest location' };
       }
       const count = raw['count'] === undefined ? undefined : positiveInt(raw['count'], 2304);
+      if (raw['count'] !== undefined && count === undefined) {
+        return { valid: false, reason: `${type} "count" must be a positive integer` };
+      }
       if (type === 'withdraw_items') {
         return {
           valid: true,
           action: {
             ...base(type, note),
-            ...(item !== undefined ? { item: item } : {}),
+            ...(item !== undefined ? { item } : {}),
             ...(count !== undefined ? { count } : {}),
-            ...(location !== undefined ? { location: location } : {}),
+            ...(location !== undefined ? { location } : {}),
           },
         };
       }
@@ -245,8 +327,9 @@ case 'deposit_items':
         valid: true,
         action: {
           ...base(type, note),
-          ...(item !== undefined ? { item: item } : {}),
-          ...(location !== undefined ? { location: location } : {}),
+          ...(item !== undefined ? { item } : {}),
+          ...(count !== undefined ? { count } : {}),
+          ...(location !== undefined ? { location } : {}),
         },
       };
     }
@@ -286,8 +369,8 @@ case 'deposit_items':
         }
         clean[k] = Math.min(Math.floor(v), 32);
       }
-      const material = raw['material'];
-      if (material !== undefined && !isItemName(material)) {
+      const material = raw['material'] === undefined ? undefined : normaliseItemName(raw['material']);
+      if (raw['material'] !== undefined && material === undefined) {
         return { valid: false, reason: 'invalid material name' };
       }
       return {
@@ -297,34 +380,36 @@ case 'deposit_items':
           structure,
           position,
           dimensions: clean,
-          ...(material !== undefined ? { material: material } : {}),
+          ...(material !== undefined ? { material } : {}),
         },
       };
     }
 
     case 'equip_item': {
-      const item = raw['item'];
-      if (!isItemName(item)) return { valid: false, reason: 'equip_item requires a valid "item"' };
-      return { valid: true, action: { ...base, type, item } };
+      const item = normaliseItemName(raw['item']);
+      if (item === undefined) return { valid: false, reason: 'equip_item requires a valid "item"' };
+      return { valid: true, action: { ...base(type, note), item } };
     }
 
     case 'drop_item': {
-      const item = raw['item'];
-      if (!isItemName(item)) return { valid: false, reason: 'drop_item requires a valid "item"' };
-      const count = raw['count'] === undefined ? undefined : positiveInt(raw['count'], 2304);
+      const item = normaliseItemName(raw['item']);
+      if (item === undefined) return { valid: false, reason: 'drop_item requires a valid "item"' };
+      // The executor refuses more than `MAX_DROP_COUNT`, so the validator
+      // refuses it too: a plan that validates must be a plan that can run.
+      const count = raw['count'] === undefined ? undefined : boundedPositiveInt(raw['count'], MAX_DROP_COUNT);
       if (raw['count'] !== undefined && count === undefined) {
-        return { valid: false, reason: 'invalid drop count' };
+        return { valid: false, reason: `drop count must be between 1 and ${MAX_DROP_COUNT}` };
       }
       const where = raw['where'] === 'chest' ? 'chest' : 'floor';
       return {
         valid: true,
-        action: { ...base, type, item, ...(count !== undefined ? { count } : {}), where },
+        action: { ...base(type, note), item, ...(count !== undefined ? { count } : {}), where },
       };
     }
 
     case 'pickup_items': {
-      const item = raw['item'];
-      if (item !== undefined && !isItemName(item)) {
+      const item = raw['item'] === undefined ? undefined : normaliseItemName(raw['item']);
+      if (raw['item'] !== undefined && item === undefined) {
         return { valid: false, reason: 'pickup_items "item" must be a valid item name' };
       }
       const count = raw['count'] === undefined ? undefined : positiveInt(raw['count'], 2304);
@@ -335,8 +420,7 @@ case 'deposit_items':
       return {
         valid: true,
         action: {
-          ...base,
-          type,
+          ...base(type, note),
           ...(item !== undefined ? { item } : {}),
           ...(count !== undefined ? { count } : {}),
           ...(radius !== undefined ? { radius } : {}),
@@ -345,13 +429,13 @@ case 'deposit_items':
     }
 
     case 'eat': {
-      const item = raw['item'];
-      if (item !== undefined && !isItemName(item)) {
+      const item = raw['item'] === undefined ? undefined : normaliseItemName(raw['item']);
+      if (raw['item'] !== undefined && item === undefined) {
         return { valid: false, reason: 'eat requires a valid "item"' };
       }
       return {
         valid: true,
-        action: { ...base, type, ...(item !== undefined ? { item: item } : {}) },
+        action: { ...base(type, note), ...(item !== undefined ? { item } : {}) },
       };
     }
 
@@ -361,18 +445,22 @@ case 'deposit_items':
       const durationMs = optionalDistance(raw['durationMs'], 60_000);
       return {
         valid: true,
-        action: { ...base, type, position, ...(durationMs !== undefined ? { durationMs } : {}) },
+        action: { ...base(type, note), position, ...(durationMs !== undefined ? { durationMs } : {}) },
       };
     }
 
     case 'wait': {
-      const durationMs = positiveInt(raw['durationMs'], 60_000);
-      if (durationMs === undefined) return { valid: false, reason: 'wait requires a positive "durationMs"' };
-      return { valid: true, action: { ...base, type, durationMs } };
+      // The executor refuses a wait longer than `DEFAULT_MAX_WAIT_MS`, so the
+      // validator refuses it here instead of letting it fail later.
+      const durationMs = boundedNonNegativeInt(raw['durationMs'], DEFAULT_MAX_WAIT_MS);
+      if (durationMs === undefined) {
+        return { valid: false, reason: `wait duration must be between 0 and ${DEFAULT_MAX_WAIT_MS} ms` };
+      }
+      return { valid: true, action: { ...base(type, note), durationMs } };
     }
 
     case 'stop':
-      return { valid: true, action: { ...base, type } };
+      return { valid: true, action: { ...base(type, note) } };
 
     case 'say': {
       const message = sanitizeChatText(raw['message']);

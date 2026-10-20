@@ -17,6 +17,14 @@ export const DEFAULT_MAX_WAIT_MS = 30_000;
 export const MAX_PLANNED_ACTIONS = 64;
 export const MAX_DROP_COUNT = 64;
 export const MAX_BUILD_DIMENSION = 32;
+/**
+ * Longest a single guard/follow action may run.
+ *
+ * The validator and the executor share these numbers, so a plan that passes
+ * validation is a plan the executor will not refuse for being too long.
+ */
+export const MAX_DEFEND_DURATION_MS = 600_000;
+export const MAX_FOLLOW_DURATION_MS = 600_000;
 
 export class ActionLimits {
   private readonly perMinute: number;
@@ -74,6 +82,26 @@ export class ActionLimits {
   resetTaskCounters(): void {
     this.miningThisTask = 0;
     this.buildingThisTask = 0;
+  }
+
+  /** The configured per-task mining ceiling. */
+  miningCeiling(): number {
+    return this.maxMine;
+  }
+
+  /** The configured per-task building ceiling. */
+  buildingCeiling(): number {
+    return this.maxBuild;
+  }
+
+  /** Mining budget still available in this task. */
+  remainingMining(): number {
+    return Math.max(0, this.maxMine - this.miningThisTask);
+  }
+
+  /** Building budget still available in this task. */
+  remainingBuilding(): number {
+    return Math.max(0, this.maxBuild - this.buildingThisTask);
   }
 
 /** Per-action sanity checks applied after allowlist validation. */
@@ -138,7 +166,16 @@ export class ActionLimits {
         if (duration !== undefined) {
           const ms = Number(duration);
           if (!Number.isFinite(ms) || ms <= 0) return { allowed: false, reason: 'invalid duration' };
-          if (ms > 600_000) return { allowed: false, reason: 'defend duration too long' };
+          if (ms > MAX_DEFEND_DURATION_MS) return { allowed: false, reason: 'defend duration too long' };
+        }
+        return { allowed: true };
+      }
+      case 'follow_player': {
+        const duration = action['durationMs'];
+        if (duration !== undefined) {
+          const ms = Number(duration);
+          if (!Number.isFinite(ms) || ms <= 0) return { allowed: false, reason: 'invalid duration' };
+          if (ms > MAX_FOLLOW_DURATION_MS) return { allowed: false, reason: 'follow duration too long' };
         }
         return { allowed: true };
       }

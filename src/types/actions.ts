@@ -56,6 +56,12 @@ export interface FollowPlayerAction extends BaseAction {
   player: string;
   /** Stay within this distance; never walk inside the player. */
   distance?: number;
+  /**
+   * How long to follow before giving up. Omitted means "the built-in
+   * default" - a follow with no deadline would keep the movement conflict
+   * group claimed forever.
+   */
+  durationMs?: number;
 }
 
 export interface StopAction extends BaseAction {
@@ -117,6 +123,8 @@ export interface DropItemAction extends BaseAction {
 export interface DepositItemsAction extends BaseAction {
   type: 'deposit_items';
   item?: string;
+  /** How many items to store. Omitted means "everything I carry". */
+  count?: number;
   /** Chest location: a named location, "nearest", or omitted for the nearest chest. */
   location?: string;
 }
@@ -173,7 +181,10 @@ export interface DefendPlayerAction extends BaseAction {
   type: 'defend_player';
   player: string;
   radius?: number;
-  /** Optional duration; omit for "until stopped". */
+  /**
+   * How long to guard. Omitted means "the built-in default" - a guard with
+   * no deadline would keep the combat conflict group claimed forever.
+   */
   durationMs?: number;
 }
 

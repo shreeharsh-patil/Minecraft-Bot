@@ -36,13 +36,7 @@ export class AttackHostileSkill implements Skill<AttackParams> {
 
     if (ctx.signal.aborted) return { ok: false, detail: 'Cancelled before I attacked.', count: 0 };
 
-    const candidates = this.facade
-      .getNearbyEntities(radius)
-      .filter((entity) => isHostile(entity))
-      .filter((entity) => wanted.length === 0 || entity.name.toLowerCase() === wanted)
-      .sort((a, b) => a.distance - b.distance);
-
-    const target = candidates[0];
+    const target = this.findTarget(radius, wanted);
     if (!target) {
       return failedResult(
         wanted.length > 0 ? `I can't find a ${wanted} nearby.` : "There are no hostile mobs nearby.",
@@ -57,23 +51,22 @@ export class AttackHostileSkill implements Skill<AttackParams> {
     try {
       while (!ctx.signal.aborted && Date.now() < deadline) {
         ticks += 1;
-        // The mob may be gone; confirm it is still worth chasing.
-        const stillThere = this.facade
-          .getNearbyEntities(radius)
-          .some((entity) => isHostile(entity) && matchesTarget(entity, target, wanted));
-        if (!stillThere) break;
+        // The mob moves, so the position captured at the start is stale by
+        // now: look it up again every tick and fight where it IS.
+        const fresh = this.findTarget(radius, wanted, target);
+        if (!fresh) break;
 
-        const distance = distance3(this.facade.getPosition(), target.position);
+        const distance = distance3(this.facade.getPosition(), fresh.position);
         if (distance > ENGAGE_RANGE) {
-          const moved = await navigateToPosition(this.facade, ctx, target.position, {
-            description: `Closing in on ${target.name}`,
+          const moved = await navigateToPosition(this.facade, ctx, fresh.position, {
+            description: `Closing in on ${fresh.name}`,
             arriveDistance: ENGAGE_RANGE,
           });
           if (moved.status === 'cancelled') break;
         }
 
-        this.facade.lookAt(target.position, true);
-        const id = resolveEntityId(target);
+        this.facade.lookAt(fresh.position, true);
+        const id = resolveEntityId(fresh);
         if (id !== null) {
           this.facade.attackEntity(id);
           hits += 1;
@@ -83,26 +76,56 @@ export class AttackHostileSkill implements Skill<AttackParams> {
           hits += 1;
         }
 
-        reportProgress(ctx, ticks, null, `fighting ${target.name}`);
+        reportProgress(ctx, ticks, null, `fighting ${fresh.name}`);
         await sleep(ATTACK_TICK_MS, ctx.signal);
       }
 
       if (ctx.signal.aborted) {
-        return { ok: false, detail: `Stopped fighting ${target.name}.`, count: hits };
+        return { ok: false, detail: `Stopped fighting ${wanted.length > 0 ? wanted : target.name}.`, count: hits };
       }
-      return { ok: hits > 0, detail: `Fought ${target.name} (${hits} swings).`, count: hits };
+      return { ok: hits > 0, detail: `Fought ${wanted.length > 0 ? wanted : target.name} (${hits} swings).`, count: hits };
     } catch (error) {
       if (isCancellation(error)) {
-        return { ok: false, detail: `Stopped fighting ${target.name}.`, count: hits };
+        return { ok: false, detail: `Stopped fighting ${wanted.length > 0 ? wanted : target.name}.`, count: hits };
       }
-      return failedResult(`Fighting ${target.name} failed: ${describeError(error)}`, hits);
+      return failedResult(`Fighting ${wanted.length > 0 ? wanted : target.name} failed: ${describeError(error)}`, hits);
     }
+  }
+
+  /**
+   * Finds the mob to fight, fresh from the world.
+   *
+   * `anchor` is the mob the fight started with: when it carries an entity
+   * id that id identifies the mob, so a different zombie is not attacked in
+   * its place. Without an id the mob is identified by name.
+   */
+  private findTarget(
+    radius: number,
+    wanted: string,
+    anchor?: EntitySummary,
+  ): EntitySummary | null {
+    const candidates = this.facade
+      .getNearbyEntities(radius)
+      .filter((entity) => isHostile(entity))
+      .filter((entity) => wanted.length > 0 || anchor === undefined || matchesAnchor(entity, anchor))
+      .sort((a, b) => a.distance - b.distance);
+    return candidates[0] ?? null;
   }
 }
 
-function matchesTarget(entity: EntitySummary, target: EntitySummary, wanted: string): boolean {
-  if (wanted.length > 0) return entity.name.toLowerCase() === wanted;
-  return entity.name === target.name;
+/**
+ * Is this entity the one the fight started with?
+ *
+ * An entity id identifies a mob exactly. Without one the name is the best
+ * available handle - and it is only used when no name was requested.
+ */
+function matchesAnchor(entity: EntitySummary, anchor: EntitySummary): boolean {
+  const anchorId = resolveEntityId(anchor);
+  if (anchorId !== null) {
+    const entityId = resolveEntityId(entity);
+    if (entityId !== null) return entityId === anchorId;
+  }
+  return entity.name === anchor.name;
 }
 
 export function createAttackHostileSkill(facade: MinecraftFacade): AttackHostileSkill {

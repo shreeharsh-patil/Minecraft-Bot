@@ -126,6 +126,24 @@ const NATURAL_BLOCKS: ReadonlySet<string> = new Set([
   'obsidian',
 ]);
 
+/**
+ * Blocks the bot may build into: empty space and the vegetation/fluids that
+ * a build would legitimately replace.
+ */
+const REPLACEABLE_TARGETS: ReadonlySet<string> = new Set([
+  'air',
+  'cave_air',
+  'void_air',
+  'water',
+  'lava',
+  'grass',
+  'short_grass',
+  'tall_grass',
+  'snow',
+  'fire',
+  'torch',
+]);
+
 export interface AntiGriefContext {
   /** Blocks the bot believes a player placed. Updated by the world tracker. */
   protectedBlocks?: ReadonlySet<string>;
@@ -146,6 +164,14 @@ function posKey(p: BlockPos): string {
   return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
 }
 
+/**
+ * The anti-grief rules.
+ *
+ * The class holds no state: every decision is a pure function of the block
+ * name, the position and the context that is passed in. That is what lets the
+ * executor and the skills each hold their own instance and still reach exactly
+ * the same verdict.
+ */
 export class AntiGriefRules {
   /**
    * May the bot break this block?
@@ -182,9 +208,24 @@ export class AntiGriefRules {
     return { allowed: true };
   }
 
-  /** Player containers are never mined, and never moved. */
-  canOpenChest(position: BlockPos, context: AntiGriefContext = {}): AntiGriefDecision {
+  /**
+   * May the bot open this chest?
+   *
+   * `mode` says what the chest is wanted for:
+   *  - `read` - taking items out (or just looking): a player-owned chest may
+   *    be opened, but only to read it;
+   *  - `write` - putting items in: a player-owned chest is off limits, the
+   *    bot must never fill somebody else's storage with its own loot.
+   */
+  canOpenChest(
+    position: BlockPos,
+    context: AntiGriefContext = {},
+    mode: 'read' | 'write' = 'read',
+  ): AntiGriefDecision {
     if (context.playerContainers?.has(posKey(position))) {
+      if (mode === 'write') {
+        return { allowed: false, reason: 'refusing to store items in a player-owned chest' };
+      }
       return { allowed: true, reason: 'player-owned chest (read-only unless asked)' };
     }
     return { allowed: true };
@@ -201,7 +242,7 @@ export class AntiGriefRules {
 
   /** Placeable? Only on air/replaceable, never inside a player container. */
   canPlaceBlock(_position: BlockPos, existing: string | null): AntiGriefDecision {
-    if (existing === null || ['air', 'cave_air', 'void_air', 'water', 'lava', 'grass'].includes(existing)) {
+    if (existing === null || REPLACEABLE_TARGETS.has(existing)) {
       return { allowed: true };
     }
     return { allowed: false, reason: `target position is occupied by "${existing}"` };

@@ -275,3 +275,55 @@ export function resolveEntityId(entity: EntitySummary): number | null {
   const candidate = (entity as { id?: unknown }).id;
   return typeof candidate === 'number' && Number.isFinite(candidate) ? candidate : null;
 }
+
+/**
+ * Is an entity standing in this block cell?
+ *
+ * A block placed where somebody is standing is materialised inside them, so
+ * the building skills refuse that cell instead of trapping a player.
+ */
+export function entityOccupiesCell(
+  facade: MinecraftFacade,
+  cell: BlockPos,
+  radius = 8,
+): EntitySummary | null {
+  const target = floorPos(cell);
+  for (const entity of facade.getNearbyEntities(radius)) {
+    // Dropped items and other clutter do not occupy a cell.
+    if (entity.type === 'other') continue;
+    const at = floorPos(entity.position);
+    if (at.x === target.x && at.y === target.y && at.z === target.z) return entity;
+  }
+  return null;
+}
+
+/**
+ * A chat gate for skills that repeat themselves.
+ *
+ * A skill that ticks every 500ms would otherwise say the same line twice a
+ * second, which is exactly what a server's spam filter punishes. The gate
+ * lets a message through when it CHANGES (a state change is worth saying) and
+ * otherwise at most once per `minIntervalMs`.
+ */
+export class ChatGate {
+  private lastMessage: string | null = null;
+  private lastAt = 0;
+
+  constructor(private readonly minIntervalMs: number) {}
+
+  /** True when the message may be sent now. Records it when it may. */
+  allow(message: string, now: number = Date.now()): boolean {
+    const changed = message !== this.lastMessage;
+    if (!changed && now - this.lastAt < this.minIntervalMs) return false;
+    this.lastMessage = message;
+    this.lastAt = now;
+    return true;
+  }
+
+  /** Sends the message through the context when the gate allows it. */
+  speak(ctx: ExecutionContext, message: string, now: number = Date.now()): boolean {
+    if (!this.allow(message, now)) return false;
+    ctx.say(message);
+    return true;
+  }
+}

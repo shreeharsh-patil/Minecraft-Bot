@@ -11,15 +11,32 @@ import { safeChatReply } from '../safety/chatInjectionGuard.js';
 import { COMMAND_SYNTAX } from './commandParser.js';
 import type { Logger } from '../utils/logger.js';
 
+/** One outbound chat line, waiting for its turn in the send queue. */
+interface QueuedLine {
+  /** The exact line that goes into Minecraft chat. */
+  text: string;
+  /** Releases the sender once the line was sent (or dropped). */
+  resolve: () => void;
+}
+
 /** Chat replies are sanitised and length-limited before sending. */
 export class ChatResponder {
   private readonly logger: Logger;
-  private readonly maxLength = 240;
+  /**
+   * Vanilla servers reject a chat line longer than 256 characters ("Chat
+   * message length exceeded") and disconnect the client, so the *whole* line
+   * - name prefix included - has to fit into that budget.
+   */
+  private readonly maxLength = 256;
   /** Minimum gap between outbound chat lines to avoid server spam flags. */
   private readonly minIntervalMs: number;
   private lastSentAt = 0;
-  private queue: Array<{ text: string; resolve: () => void }> = [];
+  private queue: QueuedLine[] = [];
   private sending = false;
+  /** The line currently being emitted, so `clear()` can cancel it. */
+  private inFlight: QueuedLine | null = null;
+  /** Set by `clear()`: this responder is closed and emits nothing more. */
+  private closed = false;
 
   constructor(logger: Logger, minIntervalMs = 400) {
     this.logger = logger.child({ component: 'responder' });
@@ -31,22 +48,45 @@ export class ChatResponder {
    * Serialised so rapid replies never exceed the server rate limit.
    */
   async send(target: string, message: string): Promise<void> {
-    const safe = safeChatReply(message, this.maxLength);
-    if (safe.length === 0) return;
-
-    return new Promise<void>((resolve) => {
-      this.queue.push({ text: target ? `${target}, ${safe}` : safe, resolve });
-      void this.drain();
-    });
+    const line = this.buildLine(target ? `${target}, ` : '', message);
+    if (line === null) return;
+    await this.enqueue(line);
   }
 
   /** Bare message with no name prefix (for system-style notices). */
   async announce(message: string): Promise<void> {
-    const safe = safeChatReply(message, this.maxLength);
-    if (safe.length === 0) return;
+    const line = this.buildLine('', message);
+    if (line === null) return;
+    await this.enqueue(line);
+  }
+
+  /**
+   * Builds one server-legal chat line.
+   *
+   * The name prefix is part of the line the server sees, so it is charged
+   * against the length budget: the body is truncated to whatever is left.
+   * Returns null when there is nothing worth sending.
+   */
+  private buildLine(prefix: string, message: string): string | null {
+    const budget = Math.max(1, this.maxLength - prefix.length);
+    const body = safeChatReply(message, budget);
+    if (body.length === 0) return null;
+    const line = `${prefix}${body}`;
+    // Belt and braces: never hand the server a line it would reject.
+    return line.length <= this.maxLength ? line : `${line.slice(0, this.maxLength - 1)}…`;
+  }
+
+  /** Queues a line and lets the drain loop send it. */
+  private enqueue(text: string): Promise<void> {
     return new Promise<void>((resolve) => {
-      this.queue.push({ text: safe, resolve });
-      void this.drain();
+      this.queue.push({ text, resolve });
+      // The drain never rejects, but the promise is caught anyway: a floating
+      // rejection would take the whole process down.
+      void this.drain().catch((error: unknown) => {
+        this.logger.error('chat drain failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     });
   }
 
@@ -57,13 +97,25 @@ export class ChatResponder {
       while (this.queue.length > 0) {
         const next = this.queue.shift();
         if (!next) break;
-        const elapsed = Date.now() - this.lastSentAt;
-        if (elapsed < this.minIntervalMs) {
-          await new Promise((r) => setTimeout(r, this.minIntervalMs - elapsed));
+        this.inFlight = next;
+        try {
+          const elapsed = Date.now() - this.lastSentAt;
+          if (elapsed < this.minIntervalMs) {
+            await new Promise((r) => setTimeout(r, this.minIntervalMs - elapsed));
+          }
+          // `clear()` may have cancelled this line while we were waiting.
+          if (this.closed || this.inFlight !== next) continue;
+          this.emit(next.text);
+          this.lastSentAt = Date.now();
+        } catch (error) {
+          // A failed send must never strand the sender or kill the process.
+          this.logger.error('chat emit failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        } finally {
+          if (this.inFlight === next) this.inFlight = null;
+          next.resolve();
         }
-        this.emit(next.text);
-        this.lastSentAt = Date.now();
-        next.resolve();
       }
     } finally {
       this.sending = false;
@@ -75,10 +127,18 @@ export class ChatResponder {
     this.logger.debug('chat out', { text });
   };
 
-  /** Test helper: drop anything pending. */
+  /**
+   * Closes the responder: everything still queued is dropped, the line that
+   * is currently being emitted is cancelled, and nothing is emitted after
+   * this point (used when a session is torn down). The waiting senders are
+   * released, so nobody is left hanging on a promise that will never settle.
+   */
   clear(): void {
-    for (const item of this.queue) item.resolve();
+    this.closed = true;
+    const pending = this.inFlight ? [...this.queue, this.inFlight] : [...this.queue];
     this.queue = [];
+    this.inFlight = null;
+    for (const item of pending) item.resolve();
   }
 }
 
@@ -125,6 +185,8 @@ export function formatStatus(params: {
   activeTasks: TaskRecord[];
   /** Human-readable "brain" description from the AI manager. */
   brain: string;
+  /** Commands still allowed in the current rate-limit window, if known. */
+  remainingCommands?: number;
 }): string {
   const task =
     params.activeTasks.length === 0
@@ -133,10 +195,12 @@ export function formatStatus(params: {
           .map((t) => t.type)
           .slice(0, 3)
           .join(', ')}`;
+  const quota =
+    params.remainingCommands === undefined ? '' : ` ${params.remainingCommands} cmd left.`;
   return (
     `HP ${Math.round(params.health)}/${params.maxHealth}, food ${Math.round(params.food)}, ` +
     `${params.dimension} at ${Math.round(params.position.x)},${Math.round(params.position.y)},` +
-    `${Math.round(params.position.z)}. ${task}. ${params.brain}`
+    `${Math.round(params.position.z)}. ${task}.${quota} ${params.brain}`
   );
 }
 

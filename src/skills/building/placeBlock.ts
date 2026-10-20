@@ -5,25 +5,28 @@ import type { ActionType } from '../../types/actions.js';
 import { CONFLICT_GROUP } from '../../types/task.js';
 import type { ExecutionContext } from '../../types/task.js';
 import type { BlockPos } from '../../types/world.js';
+import { AntiGriefRules } from '../../safety/antiGrief.js';
 import {
   approachBlock,
   describeError,
+  entityOccupiesCell,
   failedResult,
   floorPos,
   guardedOp,
   isCancellation,
+  isDangerousBlock,
   normaliseBlockName,
   formatPos,
 } from '../internal/helpers.js';
-
-/** Blocks the bot will happily replace when asked to build there. */
-const REPLACEABLE: ReadonlySet<string> = new Set(['air', 'water', 'grass', 'short_grass', 'tall_grass', 'snow', 'fire', 'torch']);
 
 export class PlaceBlockSkill implements Skill<PlaceParams> {
   public readonly name: ActionType = 'place_block';
   public readonly conflictGroups: readonly string[] = [CONFLICT_GROUP.BUILDING];
 
-  constructor(private readonly facade: MinecraftFacade) {}
+  constructor(
+    private readonly facade: MinecraftFacade,
+    private readonly rules: AntiGriefRules = new AntiGriefRules(),
+  ) {}
 
   public async execute(params: PlaceParams, ctx: ExecutionContext): Promise<SkillResult> {
     const blockName = normaliseBlockName(params.blockName ?? '');
@@ -42,6 +45,12 @@ export class PlaceBlockSkill implements Skill<PlaceParams> {
     }
     const target: BlockPos = floorPos(position);
 
+    // Dangerous materials (tnt, cactus, lava, ...) are never placed: they
+    // hurt the bot and everybody around it.
+    if (isDangerousBlock(blockName)) {
+      return failedResult(`I will not place ${blockName.replace(/_/g, ' ')} - it is too dangerous.`, 0);
+    }
+
     if (this.facade.countItem(blockName) <= 0) {
       return failedResult(`I don't have any ${blockName.replace(/_/g, ' ')}.`, 0);
     }
@@ -50,8 +59,16 @@ export class PlaceBlockSkill implements Skill<PlaceParams> {
     if (existing === blockName) {
       return { ok: true, detail: `There is already a ${blockName} there.`, count: 0 };
     }
-    if (existing !== null && !REPLACEABLE.has(existing)) {
-      return failedResult(`There is already a ${existing} at ${formatPos(target)}.`, 0);
+    // Anti-grief: never overwrite what is already there.
+    const place = this.rules.canPlaceBlock(target, existing);
+    if (!place.allowed) {
+      return failedResult(place.reason ?? `I can't build at ${formatPos(target)}.`, 0);
+    }
+
+    // A block materialised inside a player would trap (or suffocate) them.
+    const occupant = entityOccupiesCell(this.facade, target);
+    if (occupant !== null) {
+      return failedResult(`${occupant.name} is standing there - I won't build on top of them.`, 0);
     }
 
     try {
@@ -99,6 +116,9 @@ export class PlaceBlockSkill implements Skill<PlaceParams> {
   }
 }
 
-export function createPlaceBlockSkill(facade: MinecraftFacade): PlaceBlockSkill {
-  return new PlaceBlockSkill(facade);
+export function createPlaceBlockSkill(
+  facade: MinecraftFacade,
+  rules?: AntiGriefRules,
+): PlaceBlockSkill {
+  return new PlaceBlockSkill(facade, rules);
 }

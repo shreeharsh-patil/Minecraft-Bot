@@ -120,22 +120,30 @@ export class AIRouter {
         return { ...result, provider: provider.name, attempts: index + 1 };
       } catch (error) {
         const providerError = this.toProviderError(error, provider);
-        this.pool.recordFailure(provider.name, providerError);
+        const terminal = TERMINAL_KINDS.has(providerError.kind);
+        // A user-initiated abort is NOT the provider's fault. Charging it to
+        // the provider's failure counters would open the circuit breaker on a
+        // perfectly healthy provider after three `!stop`s.
+        if (!terminal) this.pool.recordFailure(provider.name, providerError);
         failures.push({
           provider: provider.name,
           kind: providerError.kind,
           message: providerError.message,
         });
-        this.logger.warn('provider attempt failed, falling back', {
-          provider: provider.name,
-          kind: providerError.kind,
-          statusCode: providerError.statusCode,
-          elapsedMs: this.now() - attemptStarted,
-          next: candidates[index + 1]?.name ?? 'none',
-        });
+        this.logger.warn(
+          terminal ? 'provider attempt aborted by the caller' : 'provider attempt failed, falling back',
+          {
+            provider: provider.name,
+            kind: providerError.kind,
+            statusCode: providerError.statusCode,
+            elapsedMs: this.now() - attemptStarted,
+            charged: !terminal,
+            next: candidates[index + 1]?.name ?? 'none',
+          },
+        );
 
         // An abort means the user pressed !stop - do not burn the other providers.
-        if (TERMINAL_KINDS.has(providerError.kind)) throw providerError;
+        if (terminal) throw providerError;
       }
     }
 
@@ -148,18 +156,24 @@ export class AIRouter {
 /**
    * How long a single attempt may take.
    *
-   * A provider that hangs must not consume the whole deadline, otherwise the
-   * fallback providers are never reached and the bot stalls. Each attempt gets
-   * the larger of (a fair share of what is left) and (everything except a small
-   * reserve kept back for the remaining candidates), so the chain still has a
-   * realistic chance even when the first provider hangs.
+   * The remaining time is split FAIRLY between the candidates that are still
+   * left: every attempt gets its own share, so a provider that hangs (the
+   * exact case the fallback exists for) cannot eat the whole deadline and
+   * leave the fallback with a few hundred milliseconds. A small reserve is
+   * still kept back for the candidates after this one, so the chain always
+   * has a turn left.
    */
   private attemptBudget(remainingMs: number, candidatesLeft: number): number {
     const remaining = Math.max(1, remainingMs);
     if (candidatesLeft <= 1) return remaining;
+    // This attempt's fair share of what is left.
     const share = Math.ceil(remaining / candidatesLeft);
+    // The reserve the candidates after this one need - never more than half
+    // of the remaining time, so even a tiny deadline leaves every candidate
+    // a turn.
     const reserve = Math.min(MIN_FALLBACK_RESERVE_MS, Math.floor(remaining / 2));
-    return Math.max(1, Math.max(share, remaining - reserve));
+    // The share, but never so much that the reserve is eaten.
+    return Math.max(1, Math.min(share, remaining - reserve));
   }
 
   /**

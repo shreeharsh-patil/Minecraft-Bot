@@ -15,7 +15,7 @@
 import type { AiConfig } from '../config/config.js';
 import type { AiProvider, ProviderStats, ProviderTier } from '../types/provider.js';
 import type { BotAction } from '../types/actions.js';
-import { AIRouter } from './router.js';
+import { AIUnavailableError, AIRouter } from './router.js';
 import { Planner } from './planner.js';
 import type { PlanRequest, PlanResult } from './planner.js';
 import { GeminiProvider } from './providers/GeminiProvider.js';
@@ -101,8 +101,16 @@ export class AIManager {
   private rejected = 0;
   private disposed = false;
 
-  /** Aborted by `cancelAll()` (the `!stop` path) and by `dispose()`. */
-  private readonly cancellation = new AbortController();
+  /**
+   * Aborted by `cancelAll()` (the `!stop` path) and by `dispose()`.
+   *
+   * It is REPLACED, not permanently aborted: `!stop` must cancel the work in
+   * flight without bricking the manager for every later request. A one-shot
+   * controller here meant the first `!stop` (which the bot itself issues
+   * before every new request) made every later plan throw "AI manager is
+   * shutting down" - the AI path was dead in production.
+   */
+  private cancellation = new AbortController();
 
   constructor(options: AIManagerOptions) {
     const { config } = options;
@@ -175,7 +183,7 @@ export class AIManager {
       const signal = this.linkSignals(request.signal);
       const started = Date.now();
       try {
-        const result = await this.planner.plan({ ...request, signal: signal.signal });
+        const result = await this.planOrDegrade(request, signal.signal);
         this.planned += 1;
         this.logger.debug('plan complete', {
           requester: request.requester,
@@ -194,18 +202,58 @@ export class AIManager {
   }
 
   /**
+   * Runs the planner, degrading a provider outage into an empty plan.
+   *
+   * The contract of this class is "an empty array when the model declined or
+   * when every provider failed - the bot must keep running either way". The
+   * router signals a total outage with `AIUnavailableError`; without this
+   * catch the bot would reject the request and the outage would be
+   * invisible in the stats.
+   *
+   * The failure stays visible: it is logged, it lands in the dropped-action
+   * list, and the provider stats still show the failures.
+   */
+  private async planOrDegrade(request: PlanRequest, signal: AbortSignal): Promise<PlanResult> {
+    try {
+      return await this.planner.plan({ ...request, signal });
+    } catch (error) {
+      if (!(error instanceof AIUnavailableError)) throw error;
+      this.logger.warn('no AI provider could answer; continuing with an empty plan', {
+        requester: request.requester,
+        failures: error.failures.map((failure) => `${failure.provider}:${failure.kind}`),
+      });
+      return {
+        actions: [],
+        dropped: [{ reason: 'ai-unavailable', raw: error.message }],
+        provider: null,
+        latencyMs: 0,
+        rawText: '',
+      };
+    }
+  }
+
+  /**
    * Aborts every in-flight plan and rejects queued ones. This is what `!stop`
    * calls: the HTTP requests are really cancelled, not merely ignored.
+   *
+   * Returns how many requests were cancelled (useful for logs).
    */
-  public cancelAll(reason = 'cancelled'): void {
-    this.cancellation.abort(new Error(reason));
+  public cancelAll(reason = 'cancelled'): number {
+    // Abort the current generation and install a fresh one: cancelling the
+    // work in flight must not disable planning for the next request.
+    const current = this.cancellation;
+    this.cancellation = new AbortController();
+    current.abort(new Error(reason));
+
     const queued = this.queue;
     this.queue = [];
+    const cancelled = queued.length + this.inFlight;
     for (const entry of queued) {
       clearTimeout(entry.timer);
       entry.reject(new Error(reason));
     }
-    this.logger.info('in-flight AI requests cancelled', { reason, inFlight: this.inFlight });
+    this.logger.info('in-flight AI requests cancelled', { reason, inFlight: this.inFlight, cancelled });
+    return cancelled;
   }
 
   public stats(): AIManagerStats {
@@ -231,6 +279,8 @@ export class AIManager {
     if (this.disposed) return;
     this.disposed = true;
     this.cancelAll('disposing');
+    // `cancelAll` installs a fresh controller; dispose must kill that too.
+    this.cancellation.abort(new Error('disposing'));
     await this.router.pool.disposeAll();
   }
 
@@ -245,9 +295,7 @@ export class AIManager {
    */
   private async acquire(signal?: AbortSignal): Promise<() => void> {
     if (signal?.aborted) throw new Error('Request aborted before it started');
-    if (this.cancellation.signal.aborted) {
-      throw new Error('AI manager is shutting down');
-    }
+    if (this.disposed) throw new Error('AI manager has been disposed');
 
     if (this.inFlight < this.maxConcurrent) {
       this.inFlight += 1;
@@ -282,10 +330,14 @@ export class AIManager {
     this.queue.push(entry);
     try {
       await deferred.promise;
-    } finally {
+    } catch (error) {
+      // The slot was never taken: only the success path may count as in-flight,
+      // otherwise a cancelled/expired queue wait shrinks capacity forever.
       signal?.removeEventListener('abort', onAbort);
-      this.inFlight += 1;
+      throw error;
     }
+    signal?.removeEventListener('abort', onAbort);
+    this.inFlight += 1;
     return this.makeRelease();
   }
 

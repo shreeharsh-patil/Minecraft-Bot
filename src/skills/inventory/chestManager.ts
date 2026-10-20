@@ -7,7 +7,8 @@
  * never thrown.
  *
  * Note on `location`: the facade exposes no named-location lookup, so a named
- * location ("home") falls back to the nearest chest and says so in chat.
+ * location ("home") cannot be resolved. Rather than quietly using a different
+ * chest - possibly one that belongs to a player - the skill says so and stops.
  */
 import { MOVEMENT } from '../../config/constants.js';
 import type { ChestRef, InventoryEntry, MinecraftFacade } from '../../types/facade.js';
@@ -15,7 +16,11 @@ import type { ChestParams, Skill, SkillResult } from '../../types/skill.js';
 import type { ActionType } from '../../types/actions.js';
 import { CONFLICT_GROUP } from '../../types/task.js';
 import type { ExecutionContext } from '../../types/task.js';
+import { AntiGriefRules } from '../../safety/antiGrief.js';
+import type { AntiGriefContext } from '../../safety/antiGrief.js';
+import type { BlockPos } from '../../types/world.js';
 import { createLogger } from '../../utils/logger.js';
+import { distance3 } from '../../types/world.js';
 import {
   approachBlock,
   describeError,
@@ -29,6 +34,18 @@ const log = createLogger({ level: 'info' }).child({ layer: 'skills', skill: 'che
 
 /** How far away we are willing to walk for a chest. */
 export const CHEST_SEARCH_DISTANCE = MOVEMENT.SCAN_RADIUS * 4;
+/**
+ * A chest this close to a player is treated as that player's own chest.
+ *
+ * The world tracker does not record which chest belongs to whom, so proximity
+ * is the closest honest signal: a chest somebody is standing next to is
+ * theirs.
+ */
+export const PLAYER_CHEST_RADIUS = 4;
+/** A full inventory stack holds this many items. */
+export const MAX_STACK_SIZE = 64;
+/** Location names that mean "the chest nearest to me". */
+const NEAREST_LOCATION = 'nearest';
 
 export interface TransferResult {
   ok: boolean;
@@ -43,20 +60,43 @@ type LocateOutcome =
   | { error: string }
   | { cancelled: true };
 
-/** Finds the nearest usable chest, or explains why none is available. */
+/**
+ * Builds the anti-grief context for a chest.
+ *
+ * Only the player-owned containers can be worked out from what the facade
+ * exposes: a chest a player is standing next to is theirs.
+ */
+export function chestAntiGriefContext(
+  facade: MinecraftFacade,
+  chest: BlockPos,
+): AntiGriefContext {
+  const owners = new Set<string>();
+  const key = `${Math.floor(chest.x)},${Math.floor(chest.y)},${Math.floor(chest.z)}`;
+  for (const player of facade.getNearbyPlayers(CHEST_SEARCH_DISTANCE + PLAYER_CHEST_RADIUS)) {
+    if (distance3(player.position, chest) <= PLAYER_CHEST_RADIUS) owners.add(key);
+  }
+  return { playerContainers: owners };
+}
+
+/**
+ * Finds the nearest usable chest, or explains why none is available.
+ *
+ * A named location that is not "nearest" cannot be resolved - the bot does
+ * not know where "home" is - so the transfer is refused instead of landing in
+ * an arbitrary (possibly player-owned) chest.
+ */
 function locateChest(
   facade: MinecraftFacade,
-  ctx: ExecutionContext,
   location: string | undefined,
 ): LocateOutcome {
+  const named = typeof location === 'string' ? location.trim().toLowerCase() : '';
+  if (named.length > 0 && named !== NEAREST_LOCATION) {
+    return { error: `I don't know where "${location ?? ''}" is.` };
+  }
+
   const chest = facade.findNearestChest(CHEST_SEARCH_DISTANCE);
   if (!chest) {
     return { error: `I couldn't find a chest within ${CHEST_SEARCH_DISTANCE} blocks.` };
-  }
-  const named = typeof location === 'string' ? location.trim().toLowerCase() : '';
-  if (named.length > 0 && named !== 'nearest') {
-    // No named-location lookup exists in the facade; be honest about it.
-    ctx.say(`I can't look up "${location ?? ''}" yet - using the nearest chest.`);
   }
   return { chest };
 }
@@ -82,7 +122,7 @@ async function reachChest(
 export async function transferIntoChest(
   facade: MinecraftFacade,
   ctx: ExecutionContext,
-  request: { item: string; count: number },
+  request: { item: string; count: number; location?: string; rules?: AntiGriefRules },
 ): Promise<TransferResult> {
   const item = normaliseBlockName(request.item);
   if (item.length === 0) return { ok: false, detail: 'I need to know what to store.', count: 0 };
@@ -93,9 +133,20 @@ export async function transferIntoChest(
   }
   const count = Math.min(request.count, available);
 
-  const found = locateChest(facade, ctx, undefined);
+  const found = locateChest(facade, request.location);
   if ('error' in found) return { ok: false, detail: found.error, count: 0 };
   if ('cancelled' in found) return { ok: false, detail: 'Cancelled before storing.', count: 0 };
+
+  // Anti-grief: never fill a chest that belongs to a player.
+  const rules = request.rules ?? new AntiGriefRules();
+  const grief = rules.canOpenChest(
+    found.chest.position,
+    chestAntiGriefContext(facade, found.chest.position),
+    'write',
+  );
+  if (!grief.allowed) {
+    return { ok: false, detail: grief.reason ?? 'That chest belongs to a player.', count: 0 };
+  }
 
   const reached = await reachChest(facade, ctx, found.chest);
   if ('error' in reached) return { ok: false, detail: reached.error, count: 0 };
@@ -129,11 +180,22 @@ export async function transferIntoChest(
 export async function transferOutOfChest(
   facade: MinecraftFacade,
   ctx: ExecutionContext,
-  request: { item?: string; count?: number; location?: string },
+  request: { item?: string; count?: number; location?: string; rules?: AntiGriefRules },
 ): Promise<TransferResult> {
-  const found = locateChest(facade, ctx, request.location);
+  const found = locateChest(facade, request.location);
   if ('error' in found) return { ok: false, detail: found.error, count: 0 };
   if ('cancelled' in found) return { ok: false, detail: 'Cancelled before taking items.', count: 0 };
+
+  // Anti-grief: a player-owned chest may be read, never written.
+  const rules = request.rules ?? new AntiGriefRules();
+  const grief = rules.canOpenChest(
+    found.chest.position,
+    chestAntiGriefContext(facade, found.chest.position),
+    'read',
+  );
+  if (!grief.allowed) {
+    return { ok: false, detail: grief.reason ?? 'I cannot open that chest.', count: 0 };
+  }
 
   const reached = await reachChest(facade, ctx, found.chest);
   if ('error' in reached) return { ok: false, detail: reached.error, count: 0 };
@@ -150,7 +212,10 @@ export async function transferOutOfChest(
     return { ok: false, detail: 'I need to know what to take out.', count: 0 };
   }
 
-  const count = Math.floor(request.count ?? (free !== null ? free : 1));
+  // The free slots are a STACK budget, not an item count: one free slot
+  // holds a whole stack.
+  const stackBudget = free !== null ? free * MAX_STACK_SIZE : MAX_STACK_SIZE;
+  const count = Math.floor(request.count ?? stackBudget);
   if (!Number.isFinite(count) || count <= 0) {
     return { ok: false, detail: 'I need a count of at least 1.', count: 0 };
   }
@@ -198,7 +263,7 @@ async function takeSomething(
     if (ctx.signal.aborted) break;
     if (total >= budget) break;
     // Ask for more of something already carried so stacks merge.
-    const wants = heldNames.has(candidate) ? Math.min(64, budget - total) : budget - total;
+    const wants = heldNames.has(candidate) ? Math.min(MAX_STACK_SIZE, budget - total) : budget - total;
     const result = await guardedOp(
       () => facade.withdrawFromChest(chest.position, candidate, wants),
       ctx,
@@ -220,7 +285,10 @@ export class DepositItemsSkill implements Skill<ChestParams> {
   public readonly name: ActionType = 'deposit_items';
   public readonly conflictGroups: readonly string[] = [CONFLICT_GROUP.INVENTORY];
 
-  constructor(private readonly facade: MinecraftFacade) {}
+  constructor(
+    private readonly facade: MinecraftFacade,
+    private readonly rules: AntiGriefRules = new AntiGriefRules(),
+  ) {}
 
   public async execute(params: ChestParams, ctx: ExecutionContext): Promise<SkillResult> {
     try {
@@ -237,7 +305,12 @@ export class DepositItemsSkill implements Skill<ChestParams> {
         return failedResult('I need a count of at least 1 to store.', 0);
       }
 
-      const result = await transferIntoChest(this.facade, ctx, { item: requested, count });
+      const result = await transferIntoChest(this.facade, ctx, {
+        item: requested,
+        count,
+        ...(params.location !== undefined ? { location: params.location } : {}),
+        rules: this.rules,
+      });
       if (!result.ok) return failedResult(result.detail, result.count);
       return { ok: true, detail: result.detail, count: result.count };
     } catch (error) {
@@ -251,7 +324,10 @@ export class WithdrawItemsSkill implements Skill<ChestParams> {
   public readonly name: ActionType = 'withdraw_items';
   public readonly conflictGroups: readonly string[] = [CONFLICT_GROUP.INVENTORY];
 
-  constructor(private readonly facade: MinecraftFacade) {}
+  constructor(
+    private readonly facade: MinecraftFacade,
+    private readonly rules: AntiGriefRules = new AntiGriefRules(),
+  ) {}
 
   public async execute(params: ChestParams, ctx: ExecutionContext): Promise<SkillResult> {
     try {
@@ -259,6 +335,7 @@ export class WithdrawItemsSkill implements Skill<ChestParams> {
         ...(params.item !== undefined ? { item: params.item } : {}),
         ...(params.count !== undefined ? { count: params.count } : {}),
         ...(params.location !== undefined ? { location: params.location } : {}),
+        rules: this.rules,
       });
       if (!result.ok) return failedResult(result.detail, result.count);
       return { ok: true, detail: result.detail, count: result.count };
@@ -269,10 +346,16 @@ export class WithdrawItemsSkill implements Skill<ChestParams> {
   }
 }
 
-export function createDepositItemsSkill(facade: MinecraftFacade): DepositItemsSkill {
-  return new DepositItemsSkill(facade);
+export function createDepositItemsSkill(
+  facade: MinecraftFacade,
+  rules?: AntiGriefRules,
+): DepositItemsSkill {
+  return new DepositItemsSkill(facade, rules);
 }
 
-export function createWithdrawItemsSkill(facade: MinecraftFacade): WithdrawItemsSkill {
-  return new WithdrawItemsSkill(facade);
+export function createWithdrawItemsSkill(
+  facade: MinecraftFacade,
+  rules?: AntiGriefRules,
+): WithdrawItemsSkill {
+  return new WithdrawItemsSkill(facade, rules);
 }

@@ -7,6 +7,10 @@
  *  - repaths only when the player has moved beyond
  *    `MOVEMENT.FOLLOW_REPATH_DISTANCE` from the current goal;
  *  - ticks on `MOVEMENT.FOLLOW_TICK_MS` and exits immediately on abort;
+ *  - runs for a bounded time, so a follow can never hold the movement
+ *    conflict group forever;
+ *  - escapes from hazards it walks into;
+ *  - says what it is doing at most once every `CHAT_INTERVAL_MS`;
  *  - always calls `stopMoving()` on the way out so the bot never keeps walking
  *    after the task was stopped.
  */
@@ -18,11 +22,13 @@ import { CONFLICT_GROUP } from '../../types/task.js';
 import type { ExecutionContext } from '../../types/task.js';
 import type { Vec3Like } from '../../types/world.js';
 import { distance3 } from '../../types/world.js';
+import { MAX_FOLLOW_DURATION_MS } from '../../safety/actionLimits.js';
 import { createLogger } from '../../utils/logger.js';
 import { sleep } from '../../utils/sleep.js';
 import {
   cancelledResult,
   clamp,
+  ChatGate,
   describeError,
   failedResult,
   isCancellation,
@@ -30,6 +36,7 @@ import {
   navigateToPosition,
   reportProgress,
 } from '../internal/helpers.js';
+import { ESCAPE_DISTANCE, ESCAPE_RADIUS, EscapeDangerSkill, needsEscape } from '../survival/escapeDanger.js';
 
 const log = createLogger({ level: 'info' }).child({ layer: 'skills', skill: 'follow_player' });
 
@@ -41,6 +48,8 @@ export interface FollowPlayerParams {
   player: string;
   /** Stay within this distance; never walk inside the player. */
   distance?: number;
+  /** How long to follow. Omitted means `DEFAULT_FOLLOW_DURATION_MS`. */
+  durationMs?: number;
 }
 
 /** The bot never stands closer than this, whatever the model asks for. */
@@ -48,6 +57,16 @@ const MIN_FOLLOW_DISTANCE = MOVEMENT.FOLLOW_STOP_DISTANCE;
 const MAX_FOLLOW_DISTANCE = 12;
 /** Consecutive ticks with no sighting before we give up on the player. */
 const MAX_MISSING_TICKS = 5;
+/**
+ * How long a follow runs when the action does not say.
+ *
+ * A follow with no deadline would keep the movement conflict group claimed
+ * for ever, so the player would never get a result. Three minutes is long
+ * enough to be useful and short enough to end on its own.
+ */
+export const DEFAULT_FOLLOW_DURATION_MS = 180_000;
+/** At most one chat line per interval: servers punish repeated spam. */
+const CHAT_INTERVAL_MS = 10_000;
 
 export class FollowPlayerSkill implements Skill<FollowPlayerParams> {
   public readonly name: ActionType = 'follow_player';
@@ -55,10 +74,12 @@ export class FollowPlayerSkill implements Skill<FollowPlayerParams> {
 
   private readonly facade: MinecraftFacade;
   private readonly tickMs: number;
+  private readonly escape: EscapeDangerSkill;
 
   constructor(facade: MinecraftFacade, tickMs: number = MOVEMENT.FOLLOW_TICK_MS) {
     this.facade = facade;
     this.tickMs = Math.max(50, tickMs);
+    this.escape = new EscapeDangerSkill(facade);
   }
 
   public async execute(params: FollowPlayerParams, ctx: ExecutionContext): Promise<SkillResult> {
@@ -68,13 +89,38 @@ export class FollowPlayerSkill implements Skill<FollowPlayerParams> {
     }
 
     const stopDistance = clamp(params.distance ?? MOVEMENT.FOLLOW_STOP_DISTANCE, MIN_FOLLOW_DISTANCE, MAX_FOLLOW_DISTANCE);
+    const durationMs = clamp(
+      params.durationMs ?? DEFAULT_FOLLOW_DURATION_MS,
+      1,
+      MAX_FOLLOW_DURATION_MS,
+    );
+    const deadline = Date.now() + durationMs;
+    const chat = new ChatGate(CHAT_INTERVAL_MS);
     let goal: Vec3Like | null = null;
     let missingTicks = 0;
     let ticks = 0;
 
     try {
       while (!ctx.signal.aborted) {
+        if (Date.now() >= deadline) {
+          // The follow had its time: report back instead of running on.
+          return { ok: true, detail: `Followed ${player} for ${Math.round(durationMs / 1000)}s.`, count: ticks };
+        }
         ticks += 1;
+
+        // The escape reflex comes first: standing in lava outranks following.
+        if (needsEscape(this.facade, ESCAPE_RADIUS)) {
+          const escaped = await this.escape.execute(
+            { radius: ESCAPE_RADIUS, distance: ESCAPE_DISTANCE },
+            ctx,
+          );
+          if (!escaped.ok) {
+            log.warn('escape reflex failed', { player, detail: escaped.detail });
+          }
+          await sleep(this.tickMs, ctx.signal);
+          continue;
+        }
+
         const sighting = this.facade.getNearestPlayer(player);
 
         if (!sighting) {
@@ -87,7 +133,8 @@ export class FollowPlayerSkill implements Skill<FollowPlayerParams> {
           if (missingTicks >= MAX_MISSING_TICKS) {
             return failedResult(`I lost sight of ${player} and stopped following.`, ticks);
           }
-          ctx.say(`I can't see ${player} right now - waiting for them.`);
+          // Rate limited: the same line every tick would be chat spam.
+          chat.speak(ctx, `I can't see ${player} right now - waiting for them.`);
           await sleep(this.tickMs, ctx.signal);
           continue;
         }

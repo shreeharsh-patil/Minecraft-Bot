@@ -68,6 +68,15 @@ export const HOSTILE_MOB_FAMILIES: ReadonlySet<string> = new Set([
   'pillager',
   'vindicator',
   'breeze',
+  // Missing from the original list: without them the bot did not see these
+  // mobs as hostiles at all (a ghast was "other", so it never fled).
+  'ghast',
+  'wither',
+  'zombie_villager',
+  'zombie_horse',
+  'skeleton_horse',
+  'shulker',
+  'breeze',
 ]);
 
 /** Tools preferred per block, best first. Keeps tool choice deterministic. */

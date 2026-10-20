@@ -109,7 +109,12 @@ function req(env: Env, key: string, issues: string[]): string {
 export function int(env: Env, key: string, fallback: number, issues: string[], min = 0): number {
   const v = str(env, key);
   if (v === undefined) return fallback;
-  const n = Number.parseInt(v, 10);
+  // Strict: "25565abc" used to parse as 25565 and be accepted silently.
+  if (!/^-?\d+$/.test(v.trim())) {
+    issues.push(`${key} must be an integer (got "${v}")`);
+    return fallback;
+  }
+  const n = Number.parseInt(v.trim(), 10);
   if (!Number.isFinite(n)) {
     issues.push(`${key} must be an integer (got "${v}")`);
     return fallback;
@@ -188,12 +193,16 @@ export function buildConfig(env: Env = process.env): AppConfig {
   const minecraft: MinecraftConfig = {
     host: req(env, 'MC_HOST', issues),
     port: int(env, 'MC_PORT', 25565, issues, 1),
-    username: req(env, 'MC_USERNAME', issues),
-    auth: oneOf(env, 'MC_AUTH', ['microsoft', 'offline'] as const, 'microsoft', issues),
+    username: req(env, 'MC_USERNAME', issues),    auth: oneOf(env, 'MC_AUTH', ['microsoft', 'offline'] as const, 'microsoft', issues),
     ...(str(env, 'MC_VERSION') ? { version: str(env, 'MC_VERSION') } : {}),
     ...(str(env, 'MC_PROFILES_PATH') ? { profilesPath: str(env, 'MC_PROFILES_PATH') } : {}),
     spawnTimeoutMs: int(env, 'MC_SPAWN_TIMEOUT_MS', 60_000, issues, 1_000),
   };
+
+  if (minecraft.port > 65535) {
+    issues.push(`MC_PORT must be a valid port number (got ${minecraft.port})`);
+    minecraft.port = 25565;
+  }
 
   if (minecraft.auth === 'offline') {
     // Legitimate for offline-mode servers (common on Aternos) but never a
@@ -294,12 +303,20 @@ export function buildConfig(env: Env = process.env): AppConfig {
 
   // Platform keep-alive: Render (and similar hosts) inject `PORT` and expect
   // an open HTTP port. HEALTH_PORT overrides the injected value explicitly.
-  const healthPortRaw = str(env, 'HEALTH_PORT') ?? str(env, 'PORT');
+  // The generic PORT variable is only honoured when a platform marker is
+  // present: on a normal machine an unrelated PORT (a dev server, a proxy)
+  // would otherwise make the bot open an HTTP listener nobody asked for.
+  const platformMarkers = ['RENDER', 'DYNO', 'HEROKU', 'RAILWAY_ENVIRONMENT', 'FLY_APP_NAME'];
+  const onPlatform = platformMarkers.some((marker) => str(env, marker) !== undefined);
+  const platformPort = onPlatform ? str(env, 'PORT') : undefined;
+  const healthPortRaw = str(env, 'HEALTH_PORT') ?? platformPort;
   let healthPort: number | undefined;
   if (healthPortRaw !== undefined) {
     const parsed = Number.parseInt(healthPortRaw, 10);
     if (!Number.isFinite(parsed) || parsed < 1 || parsed > 65535) {
-      issues.push(`HEALTH_PORT must be a port number between 1 and 65535 (got "${healthPortRaw}")`);
+      issues.push(
+        `${healthPortRaw === platformPort ? 'PORT/HEALTH_PORT' : 'HEALTH_PORT'} must be a port number between 1 and 65535 (got "${healthPortRaw}")`,
+      );
     } else {
       healthPort = parsed;
     }

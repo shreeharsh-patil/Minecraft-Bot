@@ -16,6 +16,12 @@ export interface EntitySummary {
   distance: number;
   position: Vec3Like;
   health?: number;
+  /**
+   * The server-side entity id. Attacking needs it: without it the bot can
+   * only swing at the air, because the damage is delivered by an entity
+   * attack packet, not by using the item.
+   */
+  id?: number;
 }
 
 export interface PlayerSummary {

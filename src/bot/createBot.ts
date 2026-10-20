@@ -9,7 +9,6 @@ import { pathfinder, Movements } from 'mineflayer-pathfinder';
 import type { Movements as MovementsType } from 'mineflayer-pathfinder';
 import type { MinecraftConfig } from '../config/config.js';
 import type { Logger } from '../utils/logger.js';
-import { withTimeout } from '../utils/sleep.js';
 
 /** Default for callers that don't pass a config (tests, tooling). */
 const SPAWN_TIMEOUT_MS = 60_000;
@@ -89,6 +88,14 @@ export async function createBot(options: CreateBotOptions): Promise<ConnectedBot
   (bot as unknown as { pathfinder?: { setMovements?: (m: MovementsType) => void } }).pathfinder
     ?.setMovements?.(movements);
 
+  // Keep an error listener attached for the whole session. An EventEmitter
+  // 'error' event without a listener THROWS, so a bot error in the window
+  // between spawning and the app wiring its own handlers would crash the
+  // process (a crash loop on a hosted service).
+  bot.on('error', (error: Error) => {
+    logger.warn('bot error', { error: error.message });
+  });
+
   logger.info('bot spawned', {
     username: bot.username,
     dimension: bot.game?.dimension,
@@ -98,55 +105,59 @@ export async function createBot(options: CreateBotOptions): Promise<ConnectedBot
   return { bot, movements };
 }
 
-/** Resolves on `spawn`, rejects on error/timeout/kick. */
-function waitForSpawn(bot: Bot, logger: Logger, timeoutMs: number): Promise<void> {
+/**
+ * Resolves on `spawn`, rejects on error/timeout/kick.
+ *
+ * Exported for tests: the rest of `createBot` needs a live server, but this
+ * is the part that decides whether the bot ever comes online.
+ */
+export function waitForSpawn(bot: Bot, logger: Logger, timeoutMs: number): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    let settled = false;
+
     const cleanup = (): void => {
       bot.removeListener('spawn', onSpawn);
       bot.removeListener('error', onError);
       bot.removeListener('kicked', onKicked);
+      clearTimeout(timer);
     };
 
     const onSpawn = (): void => {
+      if (settled) return;
+      settled = true;
       cleanup();
       resolve();
     };
 
     const onError = (error: Error): void => {
+      if (settled) return;
+      settled = true;
       cleanup();
       reject(new Error(`connection error: ${error.message}`));
     };
 
     const onKicked = (reason: unknown): void => {
+      if (settled) return;
+      settled = true;
       cleanup();
       const text = typeof reason === 'string' ? reason : JSON.stringify(reason);
       reject(new Error(`kicked while connecting: ${text}`));
     };
 
-    bot.once('spawn', onSpawn);
-    bot.once('error', onError);
-    bot.once('kicked', onKicked);
+    // One path per outcome: the previous version raced two independent
+    // waiters, which left a stray 'spawn' listener behind on the timeout
+    // path and could reject after the promise had already resolved.
+    bot.on('spawn', onSpawn);
+    bot.on('error', onError);
+    bot.on('kicked', onKicked);
 
-    // Guard against a server that accepts TCP but never completes the handshake.
-    withTimeout(
-      new Promise<void>((resolveWait) => bot.once('spawn', () => resolveWait())),
-      timeoutMs,
-      'waiting for spawn',
-    ).then(
-      () => {
-        cleanup();
-        resolve();
-      },
-      (error: unknown) => {
-        cleanup();
-        logger.warn('spawn wait ended', {
-          error: error instanceof Error ? error.message : String(error),
-        });
-        // Always reject with an Error so callers can rely on `.message`.
-        reject(
-          error instanceof Error ? error : new Error(`waiting for spawn failed: ${String(error)}`),
-        );
-      },
-    );
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      logger.warn('spawn wait ended', { timeoutMs });
+      reject(new Error(`waiting for spawn timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref?.();
   });
 }

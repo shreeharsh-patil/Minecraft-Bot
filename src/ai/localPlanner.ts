@@ -23,6 +23,7 @@ import {
   matchPhrase,
   normalize,
   normalizeMinimal,
+  safeQuote,
   splitClauses,
   similarity,
   tokenize,
@@ -30,6 +31,8 @@ import {
 } from './local/language.js';
 import type { PlanRequest, PlanResult } from './planner.js';
 import type { BotAction } from '../types/actions.js';
+import { validateAction } from '../executor/validator.js';
+import { detectInjectedIntent } from '../safety/chatInjectionGuard.js';
 import { silentLogger } from '../utils/logger.js';
 import type { Logger } from '../utils/logger.js';
 
@@ -41,6 +44,13 @@ export interface LocalPlannerOptions {
 
 /** Matches the LLM planner's per-plan ceiling. */
 const DEFAULT_MAX_ACTIONS = 8;
+
+/**
+ * The clarification line used when nothing safe can be quoted back.
+ * Bot-composed, so it always passes the shared validator.
+ */
+const UNSURE_FALLBACK =
+  "I couldn't work out what that means. Try !help or something like 'follow me', 'mine 20 stone', 'equip sword'.";
 
 /** Parameter clamps (kept in step with validator ceilings). */
 const LIMITS = {
@@ -181,7 +191,18 @@ export class LocalPlanner {
         dropped.push({ reason: 'max-actions-exceeded', raw: action.type });
         break;
       }
-      actions.push(this.bound(action));
+      // Same chokepoint as the LLM path: every action is validated by the
+      // shared validator before it can reach a skill. A bug in the local
+      // planner therefore cannot smuggle an unchecked action into the world.
+      const checked = validateAction(this.bound(action));
+      if (!checked.valid || checked.action === undefined) {
+        dropped.push({
+          reason: `invalid action rejected: ${checked.reason ?? 'unknown'}`,
+          raw: action.type,
+        });
+        continue;
+      }
+      actions.push(checked.action);
     }
 
     return {
@@ -333,9 +354,24 @@ export class LocalPlanner {
     }
   }
 
+  /**
+   * The clarification line for a request we did not understand.
+   *
+   * The player's own words are NEVER quoted verbatim: untrusted text that
+   * looks like an injection would make the whole message invalid, and the
+   * bot would answer nothing at all instead of helping. The quote is either
+   * scrubbed down to harmless characters or dropped entirely.
+   */
   private unsureMessage(clause: string): string {
-    const topic = clause.length === 0 ? 'that' : clause.replace(/_/g, ' ');
-    return `I understood '${topic.slice(0, 60).trim()}' but not what to do. Try '!help' or something like 'follow me', 'mine 20 stone', 'equip sword'.`;
+    const topic = safeQuote(clause);
+    const lead =
+      topic === undefined
+        ? "I couldn't work out what that means."
+        : `I understood '${topic}' but not what to do.`;
+    const message = `${lead} Try !help or something like 'follow me', 'mine 20 stone', 'equip sword'.`;
+    // Belt and braces: the composed line must survive the shared validator's
+    // injection screen, or the bot would stay silent.
+    return detectInjectedIntent(message) === null ? message : UNSURE_FALLBACK;
   }
 
   // --- movement / body -----------------------------------------------------------

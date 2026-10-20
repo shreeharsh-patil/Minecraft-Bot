@@ -12,6 +12,7 @@
  *  4. remember that "wood", "logs" and "oak log" all mean the same block.
  */
 import { BLOCK_TOOL, FOODS, HOSTILE_MOB_FAMILIES, SOFT_BLOCKS } from '../../config/constants.js';
+import { detectInjectedIntent } from '../../safety/chatInjectionGuard.js';
 
 // --- normalisation ----------------------------------------------------------
 
@@ -264,6 +265,39 @@ export function splitClauses(raw: string): string[] {
     .split(/,?\s*(?:\band then\b|\bthen\b|\bafter that\b|;)\s*/g)
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
+}
+
+// --- safe quoting -------------------------------------------------------------
+
+/** The only characters a quoted snippet of player text may contain. */
+const SAFE_QUOTE_CHARS = /[^A-Za-z0-9 _.,!?'-]/g;
+
+/**
+ * A short, safe echo of untrusted player text.
+ *
+ * Untrusted text is never quoted verbatim:
+ *  - text that looks like a prompt-injection attempt (or asks for secrets)
+ *    is dropped entirely;
+ *  - anything else is reduced to harmless characters.
+ *
+ * The reason is practical as well as safe: the shared validator rejects a
+ * chat line that contains an injection marker, so quoting the raw text
+ * would make the whole clarification message invalid and the bot would
+ * answer nothing at all.
+ *
+ * Returns undefined when there is nothing safe left to quote.
+ */
+export function safeQuote(text: string, maxChars = 60): string | undefined {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return undefined;
+  if (detectInjectedIntent(trimmed) !== null) return undefined;
+  const scrubbed = trimmed.replace(SAFE_QUOTE_CHARS, ' ').replace(/\s+/g, ' ').trim();
+  if (scrubbed.length === 0) return undefined;
+  // Scrubbing can join words into a new pattern ("ignore." -> "ignore
+  // all ..."), so the scrubbed text is screened as well.
+  if (detectInjectedIntent(scrubbed) !== null) return undefined;
+  const clipped = scrubbed.slice(0, maxChars).trim();
+  return clipped.length === 0 ? undefined : clipped;
 }
 
 // --- vocabulary ---------------------------------------------------------------
