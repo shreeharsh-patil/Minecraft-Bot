@@ -9,10 +9,10 @@ export class OpenAIProvider extends OpenAiCompatibleProvider {
   constructor(options: Partial<OpenAiCompatibleOptions> = {}) {
     super({
       name: 'openai',
-      model: OPENAI_DEFAULT_MODEL,
-      baseUrl: OPENAI_BASE_URL,
-      apiKey: '',
       ...options,
+      model: options.model ?? OPENAI_DEFAULT_MODEL,
+      baseUrl: options.baseUrl ?? OPENAI_BASE_URL,
+      apiKey: options.apiKey ?? '',
     });
   }
 }

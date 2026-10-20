@@ -22,11 +22,13 @@
     "minecraft-data": "^3.117.0",
     "mineflayer": "^4.33.0",
     "mineflayer-pathfinder": "^2.4.5",
+    "prismarine-entity": "^2.6.0",
     "vec3": "^0.1.10"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
     "@types/node": "^24.10.1",
+    "@vitest/coverage-v8": "^3.2.7",
     "eslint": "^9.39.1",
     "globals": "^16.5.0",
     "tsx": "^4.20.7",

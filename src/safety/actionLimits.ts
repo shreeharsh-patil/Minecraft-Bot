@@ -10,6 +10,20 @@ export interface LimitDecision {
   reason?: string;
 }
 
+/**
+ * Normalises a count of blocks before it is booked against a ceiling.
+ *
+ * Returns `null` for a count that cannot be booked at all. A NaN in the
+ * counter would poison it for the rest of the task: every later budget check
+ * compares against NaN, and every comparison with NaN is false, so the
+ * per-task ceiling would silently stop applying. A negative count would do
+ * the opposite and hand the bot extra budget.
+ */
+function bookableCount(count: number): number | null {
+  if (!Number.isFinite(count) || count < 0) return null;
+  return Math.floor(count);
+}
+
 /** Per-task ceilings and absolute sanity bounds. */
 export const DEFAULT_MAX_MINE = 512;
 export const DEFAULT_MAX_BUILD = 256;
@@ -32,6 +46,8 @@ export class ActionLimits {
   private readonly maxBuild: number;
   /** Sliding window of action timestamps. */
   private window: number[] = [];
+  /** When the rate window was last looked at, to spot a clock that jumped. */
+  private lastCheckAt = 0;
   private miningThisTask = 0;
   private buildingThisTask = 0;
 
@@ -45,6 +61,16 @@ export class ActionLimits {
   checkRate(): LimitDecision {
     if (this.perMinute <= 0) return { allowed: true };
     const now = Date.now();
+    // The window is timed with the wall clock, and the wall clock can jump
+    // backwards (NTP, a manual change, a suspended machine). The timestamps
+    // already in the window would then sit "in the future": `now - t` stays
+    // negative, so they could never slide out and the bot would be locked
+    // out of every action until the clock caught up. They are meaningless
+    // after such a jump, so the window starts fresh.
+    if (now < this.lastCheckAt) {
+      this.window = [];
+    }
+    this.lastCheckAt = now;
     this.window = this.window.filter((t) => now - t < 60_000);
     if (this.window.length >= this.perMinute) {
       return { allowed: false, reason: `action rate limit reached (${this.perMinute}/min)` };
@@ -63,16 +89,26 @@ export class ActionLimits {
     return Math.max(0, Math.min(n, this.maxBuild));
   }
 
+  /** Books the blocks that were actually mined against the per-task ceiling. */
   recordMining(count = 1): LimitDecision {
-    this.miningThisTask += count;
+    const booked = bookableCount(count);
+    if (booked === null) {
+      return { allowed: false, reason: 'invalid mining count' };
+    }
+    this.miningThisTask += booked;
     if (this.miningThisTask > this.maxMine) {
       return { allowed: false, reason: `mining limit exceeded (${this.maxMine} blocks per task)` };
     }
     return { allowed: true };
   }
 
+  /** Books the blocks that were actually placed against the per-task ceiling. */
   recordBuilding(count = 1): LimitDecision {
-    this.buildingThisTask += count;
+    const booked = bookableCount(count);
+    if (booked === null) {
+      return { allowed: false, reason: 'invalid building count' };
+    }
+    this.buildingThisTask += booked;
     if (this.buildingThisTask > this.maxBuild) {
       return { allowed: false, reason: `building limit exceeded (${this.maxBuild} blocks per task)` };
     }
@@ -155,7 +191,11 @@ export class ActionLimits {
             return { allowed: false, reason: `dimension exceeds ${MAX_BUILD_DIMENSION}` };
           }
         }
-        const volume = Object.values(dims).reduce<number>((sum, v) => sum * Number(v), 1);
+        // The volume is the number of BLOCKS the structure needs. Multiplying
+        // the dimension values only works for a wall (length x height): a
+        // platform is size x size and a house is a whole box, so the old
+        // product let a 9x6 house (320 blocks) through as "54".
+        const volume = this.buildVolume(action['structure'], dims);
         if (volume > this.maxBuild) {
           return { allowed: false, reason: `structure volume ${volume} exceeds limit ${this.maxBuild}` };
         }
@@ -190,5 +230,30 @@ export class ActionLimits {
       buildingThisTask: this.buildingThisTask,
       recentActions: this.window.length,
     };
+  }
+
+  /**
+   * How many blocks a structure needs.
+   *
+   * Multiplying the dimension values only works for a wall (length x height).
+   * A platform is size x size and a simple house is a hollow box (walls, a
+   * floor and a roof), so the plain product let a 9x6 house - 320 blocks -
+   * through as "54" and past the ceiling.
+   */
+  private buildVolume(structure: unknown, dims: Record<string, unknown>): number {
+    const size = Number(dims['size'] ?? 0);
+    const length = Number(dims['length'] ?? 0);
+    const height = Number(dims['height'] ?? 0);
+    switch (structure) {
+      case 'wall':
+        return length * Math.max(1, height);
+      case 'platform':
+        return size * size;
+      case 'simple_house':
+        // Four walls, a floor and a roof, one block thick.
+        return size * size * 3 + size * 4 * Math.max(1, height);
+      default:
+        return Object.values(dims).reduce<number>((sum, value) => sum * Number(value), 1);
+    }
   }
 }

@@ -12,6 +12,7 @@ import type { MinecraftFacade, MoveResult } from '../../types/facade.js';
 import type { SkillResult } from '../../types/skill.js';
 import type { ExecutionContext, TaskProgress } from '../../types/task.js';
 import type { BlockPos, EntitySummary, Vec3Like } from '../../types/world.js';
+import { distance3 } from '../../types/world.js';
 import { AbortedError, withTimeout } from '../../utils/sleep.js';
 
 /** Timeout for a single facade action (dig, place, chest transfer, eat, ...). */
@@ -53,7 +54,10 @@ export function isCancellation(error: unknown): boolean {
 }
 
 export function clamp(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) return min;
+  // NaN has no direction at all, so it falls back to the low end. An infinite
+  // value does have one: it clamps to the end it is beyond, not the other way
+  // round (a duration of Infinity has to become the longest one, not none).
+  if (Number.isNaN(value)) return min;
   return Math.min(max, Math.max(min, value));
 }
 
@@ -70,13 +74,47 @@ export function formatPos(p: Vec3Like): string {
   return `${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)}`;
 }
 
-/** "oak logs" / "Oak-Log" -> "oak_log". Keeps model output tolerant. */
+/**
+ * Plural words the model uses where Minecraft uses the singular.
+ *
+ * No real block or item id ends with one of these words - "sweet_berries" and
+ * "bricks" are real ids and are deliberately absent - so folding the plural
+ * back can never rename something that actually exists.
+ */
+const SINGULAR_NAMES: Readonly<Record<string, string>> = {
+  logs: 'log',
+  ingots: 'ingot',
+  ores: 'ore',
+  swords: 'sword',
+  pickaxes: 'pickaxe',
+  shovels: 'shovel',
+  axes: 'axe',
+  hoes: 'hoe',
+  apples: 'apple',
+  eggs: 'egg',
+  carrots: 'carrot',
+  potatoes: 'potato',
+  beetroots: 'beetroot',
+};
+
+/**
+ * "oak logs" / "Oak-Log" -> "oak_log". Keeps model output tolerant.
+ *
+ * The plural is folded back because Minecraft names the item in the singular:
+ * a lookup of "oak_logs" finds nothing while the bot is carrying "oak_log".
+ */
 export function normaliseBlockName(name: string): string {
-  return name
+  const cleaned = name
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_')
     .replace(/[^a-z0-9_]/g, '');
+  const words = cleaned.split('_');
+  const last = words[words.length - 1];
+  const singular = last === undefined ? undefined : SINGULAR_NAMES[last];
+  if (singular === undefined) return cleaned;
+  words[words.length - 1] = singular;
+  return words.join('_');
 }
 
 export function isDangerousBlock(name: string | null | undefined): boolean {
@@ -267,9 +305,9 @@ export async function approachBlock(
 }
 
 /**
- * `EntitySummary` carries no entity id, yet `attackEntity` needs one. We read an
- * optional numeric `id` when the facade provides one, and fall back to a swing
- * (look + use) when it does not.
+ * `EntitySummary` carries no guaranteed entity id, yet `attackEntity` needs
+ * one. We read an optional numeric `id` when the facade provides one, and
+ * fall back to a swing (look + use) when it does not.
  */
 export function resolveEntityId(entity: EntitySummary): number | null {
   const candidate = (entity as { id?: unknown }).id;
@@ -281,6 +319,11 @@ export function resolveEntityId(entity: EntitySummary): number | null {
  *
  * A block placed where somebody is standing is materialised inside them, so
  * the building skills refuse that cell instead of trapping a player.
+ *
+ * The facade reports the entities around the BOT, so the search always reaches
+ * the cell: `radius` is the extra margin around it. Searching only the bot's
+ * own neighbourhood answered "nobody there" for every cell the bot had not
+ * walked to yet.
  */
 export function entityOccupiesCell(
   facade: MinecraftFacade,
@@ -288,7 +331,8 @@ export function entityOccupiesCell(
   radius = 8,
 ): EntitySummary | null {
   const target = floorPos(cell);
-  for (const entity of facade.getNearbyEntities(radius)) {
+  const reach = radius + distance3(facade.getPosition(), target);
+  for (const entity of facade.getNearbyEntities(reach)) {
     // Dropped items and other clutter do not occupy a cell.
     if (entity.type === 'other') continue;
     const at = floorPos(entity.position);

@@ -14,6 +14,8 @@ const PLAYER_STRUCTURE_BLOCKS: ReadonlySet<string> = new Set([
   'trapped_chest',
   'ender_chest',
   'barrel',
+  'dispenser',
+  'dropper',
   'crafting_table',
   'furnace',
   'blast_furnace',
@@ -25,8 +27,21 @@ const PLAYER_STRUCTURE_BLOCKS: ReadonlySet<string> = new Set([
   'jukebox',
   'bed',
   'white_bed',
-  'red_bed',
+  'orange_bed',
+  'magenta_bed',
+  'light_blue_bed',
+  'yellow_bed',
+  'lime_bed',
+  'pink_bed',
+  'gray_bed',
+  'light_gray_bed',
+  'cyan_bed',
+  'purple_bed',
   'blue_bed',
+  'brown_bed',
+  'green_bed',
+  'red_bed',
+  'black_bed',
   'beacon',
   'conduit',
   'lectern',
@@ -42,6 +57,7 @@ const PLAYER_STRUCTURE_BLOCKS: ReadonlySet<string> = new Set([
   'painting',
   'flower_pot',
   'lantern',
+  'soul_lantern',
   'torch',
   'soul_torch',
   'ladder',
@@ -50,7 +66,6 @@ const PLAYER_STRUCTURE_BLOCKS: ReadonlySet<string> = new Set([
   'oak_wall_sign',
   'banner',
   'shulker_box',
-  'white_bed',
 ]);
 
 /** Blocks that are commonly part of a house/farm and should not be auto-mined. */
@@ -81,11 +96,47 @@ const PROTECTED_BLOCKS: ReadonlySet<string> = new Set([
   'jungle_planks',
   'acacia_planks',
   'dark_oak_planks',
+  'mangrove_planks',
+  'cherry_planks',
+  'pale_oak_planks',
+  'bamboo_planks',
+  'crimson_planks',
+  'warped_planks',
+  'bookshelf',
+  'chiseled_bookshelf',
+  'scaffolding',
+  'iron_bars',
+  'crafter',
+  'fletching_table',
+  'decorated_pot',
   'cobblestone_wall',
   'stone_bricks',
   'bricks',
   'stonecutter',
 ]);
+
+/**
+ * Block families that always belong to a player build.
+ *
+ * The lists above name the blocks the bot meets most often, but a build is
+ * made of whatever the player has: every wood has its own planks, every bed
+ * its own colour and every wall its own name. The families below cover the
+ * rest - the way the native client does - so a mangrove plank wall is
+ * protected just like an oak one.
+ */
+const PLAYER_BUILD_FAMILIES: readonly string[] = [
+  '_planks',
+  '_bed',
+  '_sign',
+  '_banner',
+  '_wall',
+  '_shulker_box',
+];
+
+/** True for a block that belongs to a player build, whatever it is called. */
+function isPlayerBuildBlock(name: string): boolean {
+  return PLAYER_BUILD_FAMILIES.some((family) => name.endsWith(family));
+}
 
 /** Blocks the bot may always break without asking (nature only). */
 const NATURAL_BLOCKS: ReadonlySet<string> = new Set([
@@ -141,7 +192,6 @@ const REPLACEABLE_TARGETS: ReadonlySet<string> = new Set([
   'tall_grass',
   'snow',
   'fire',
-  'torch',
 ]);
 
 export interface AntiGriefContext {
@@ -162,6 +212,46 @@ export interface AntiGriefDecision {
 
 function posKey(p: BlockPos): string {
   return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+}
+
+/**
+ * How close a block may be to a player container and still count as part of
+ * that player's structure.
+ *
+ * A chest is the one thing the bot can always recognise as somebody's, and
+ * a build is bigger than the chest: the walls around it belong to the same
+ * player.
+ */
+const STRUCTURE_RADIUS = 2;
+
+/**
+ * True when the block sits inside the structure of a player-owned container.
+ *
+ * Natural terrain is excluded on purpose: the bot has to be able to dig
+ * stone, even next to somebody's chest.
+ */
+function insidePlayerStructure(position: BlockPos, context: AntiGriefContext): boolean {
+  const containers = context.playerContainers;
+  if (containers === undefined) return false;
+  const x = Math.floor(position.x);
+  const y = Math.floor(position.y);
+  const z = Math.floor(position.z);
+  for (const key of containers) {
+    const parts = key.split(',');
+    if (parts.length !== 3) continue;
+    const cx = Number(parts[0]);
+    const cy = Number(parts[1]);
+    const cz = Number(parts[2]);
+    if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cz)) continue;
+    if (
+      Math.abs(cx - x) <= STRUCTURE_RADIUS &&
+      Math.abs(cy - y) <= STRUCTURE_RADIUS &&
+      Math.abs(cz - z) <= STRUCTURE_RADIUS
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -198,7 +288,18 @@ export class AntiGriefRules {
       return { allowed: false, reason: `refusing to break player structure block "${blockName}"` };
     }
 
-    if (PROTECTED_BLOCKS.has(blockName) && !NATURAL_BLOCKS.has(blockName)) {
+    // A block inside the structure of a player container belongs to that
+    // player, whatever it is made of. This is what keeps the bot from
+    // carving a tunnel through somebody's base just because the block it
+    // was asked for happens to be inside it.
+    if (!NATURAL_BLOCKS.has(blockName) && insidePlayerStructure(position, context)) {
+      return explicitlyRequested
+        ? { allowed: true, reason: 'player structure broken because explicitly requested' }
+        : { allowed: false, reason: `refusing to break "${blockName}" inside a player's structure` };
+    }
+
+    const protectedByName = PROTECTED_BLOCKS.has(blockName) || isPlayerBuildBlock(blockName);
+    if (protectedByName && !NATURAL_BLOCKS.has(blockName)) {
       return explicitlyRequested
         ? { allowed: true }
         : { allowed: false, reason: `refusing to break protected block "${blockName}"` };

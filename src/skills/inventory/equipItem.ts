@@ -17,32 +17,41 @@ export class EquipItemSkill implements Skill<ItemParams> {
     if (item.length === 0) {
       return failedResult('I need to know what to equip.', 0);
     }
+    const pretty = item.replace(/_/g, ' ');
 
     const available = this.facade.countItem(item);
     if (available <= 0) {
-      return failedResult(`I don't have any ${item.replace(/_/g, ' ')}.`, 0);
+      return failedResult(`I don't have any ${pretty}.`, 0);
     }
     if (this.facade.heldItem() === item) {
-      return { ok: true, detail: `I'm already holding ${item.replace(/_/g, ' ')}.`, count: available };
+      // One item is equipped either way: `count` is the number of items
+      // handled, not the number of that item the bot happens to carry.
+      return { ok: true, detail: `I'm already holding ${pretty}.`, count: 1 };
     }
 
     try {
       const result = await guardedOp(() => this.facade.equipItem(item), ctx, `Equipping ${item}`);
       if (result.status === 'cancelled') {
-        return { ok: false, detail: `Stopped before equipping ${item}.`, count: 0 };
+        return { ok: false, detail: `Stopped before equipping ${pretty}.`, count: 0 };
       }
       if (result.status === 'error') {
         return failedResult(result.reason, 0);
       }
       if (!result.value) {
-        return failedResult(`I couldn't equip ${item.replace(/_/g, ' ')}.`, 0);
+        return failedResult(`I couldn't equip ${pretty}.`, 0);
       }
-      return { ok: true, detail: `Equipped ${item.replace(/_/g, ' ')}.`, count: 1 };
+      // The facade only reports that the equip call did not fail. The hand is
+      // what decides: without this check a swap that silently did not happen
+      // is still announced as "Equipped ...".
+      if (this.facade.heldItem() !== item) {
+        return failedResult(`I couldn't hold ${pretty}.`, 0);
+      }
+      return { ok: true, detail: `Equipped ${pretty}.`, count: 1 };
     } catch (error) {
       if (isCancellation(error)) {
-        return { ok: false, detail: `Stopped before equipping ${item}.`, count: 0 };
+        return { ok: false, detail: `Stopped before equipping ${pretty}.`, count: 0 };
       }
-      return failedResult(`Equipping ${item} failed: ${describeError(error)}`, 0);
+      return failedResult(`Equipping ${pretty} failed: ${describeError(error)}`, 0);
     }
   }
 }

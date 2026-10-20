@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 import { AIManager } from '../../src/ai/AIManager.js';
 import type { AiConfig } from '../../src/config/config.js';
 import type { CompactContext } from '../../src/ai/contextBuilder.js';
+import type { AiProvider, CompletionRequest, CompletionResult } from '../../src/types/provider.js';
 
 const config: AiConfig = {
   providers: [],
@@ -84,7 +85,43 @@ describe('AIManager - cancellation lifecycle', () => {
   });
 
   it('reports how many requests were cancelled', async () => {
-    const ai = new AIManager({ config });
+    // A provider that never answers, so the request really is in flight.
+    let markInFlight: () => void = () => undefined;
+    const inFlight = new Promise<void>((resolve) => {
+      markInFlight = resolve;
+    });
+    const hanging: AiProvider = {
+      name: 'groq',
+      model: 'm',
+      isAvailable: () => true,
+      healthCheck: () => Promise.resolve(true),
+      complete: (req: CompletionRequest) =>
+        new Promise<CompletionResult>((_resolve, reject) => {
+          markInFlight();
+          req.signal?.addEventListener(
+            'abort',
+            () => {
+              const error = new Error('aborted');
+              error.name = 'AbortError';
+              reject(error);
+            },
+            { once: true },
+          );
+        }),
+      dispose: () => undefined,
+    };
+
+    const ai = new AIManager({ config, providers: [hanging] });
+    const promise = ai.planDetailed({ instruction: 'follow me', requester: 'Alice', context });
+    // Wait until the request is really inside the provider, then cancel it.
+    await inFlight;
+    expect(ai.stats().inFlight).toBe(1);
+
+    expect(ai.cancelAll('test')).toBe(1);
+    await expect(promise).rejects.toMatchObject({ kind: 'aborted' });
+
+    // With nothing in flight the count is back to zero.
+    expect(ai.stats().inFlight).toBe(0);
     expect(ai.cancelAll('test')).toBe(0);
     await ai.dispose();
   });

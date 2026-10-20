@@ -56,6 +56,10 @@ export class AIUnavailableError extends Error {
  * problem is provider-specific (a wrong OpenAI key must not disable Groq).
  * Non-retryable errors are still not retried against the *same* provider,
  * since each candidate is tried at most once per request.
+ *
+ * The `aborted` kind is reserved for a request the CALLER cancelled: it is
+ * produced only when the caller's signal is aborted (see `toProviderError`).
+ * A provider that aborts on its own is a provider fault and never terminal.
  */
 const TERMINAL_KINDS: ReadonlySet<ProviderErrorKind> = new Set(['aborted']);
 
@@ -104,11 +108,9 @@ export class AIRouter {
       }
 
       const attemptStarted = this.now();
+      const budgetMs = this.attemptBudget(deadline - this.now(), candidates.length - index);
       try {
-        const result = await provider.complete({
-          ...request,
-          timeoutMs: this.attemptBudget(deadline - this.now(), candidates.length - index),
-        });
+        const result = await this.runAttempt(provider, { ...request, timeoutMs: budgetMs }, budgetMs);
         this.pool.recordSuccess(provider.name, result.latencyMs);
         if (index > 0) {
           this.logger.info('provider fallback succeeded', {
@@ -119,7 +121,11 @@ export class AIRouter {
         }
         return { ...result, provider: provider.name, attempts: index + 1 };
       } catch (error) {
-        const providerError = this.toProviderError(error, provider);
+        // The caller's signal - not the shape of the error - decides whether
+        // this attempt is terminal: only a cancelled request (`!stop`) stops
+        // the chain. A provider that aborts on its own is a provider fault
+        // and falls through to the next candidate.
+        const providerError = this.toProviderError(error, provider, request.signal?.aborted === true);
         const terminal = TERMINAL_KINDS.has(providerError.kind);
         // A user-initiated abort is NOT the provider's fault. Charging it to
         // the provider's failure counters would open the circuit breaker on a
@@ -151,6 +157,43 @@ export class AIRouter {
       `All AI providers failed (${failures.map((f) => `${f.provider}:${f.kind}`).join(', ')})`,
       failures,
     );
+  }
+
+/**
+   * Runs one attempt under the attempt budget.
+   *
+   * The provider is asked to abort at `budgetMs`, but a provider that ignores
+   * (or outlives) its deadline would eat the whole request budget and leave
+   * the fallback with nothing - exactly the case the fallback chain exists
+   * for. The router therefore enforces the budget itself: when it expires the
+   * attempt is abandoned, the provider is charged with a timeout and the next
+   * candidate gets its turn.
+   */
+  private async runAttempt(
+    provider: AiProvider,
+    request: CompletionRequest,
+    budgetMs: number,
+  ): Promise<CompletionResult> {
+    // The provider is started first so that its own timeout timer is armed
+    // before the router's watchdog: the provider's own error then wins the
+    // race and the watchdog only catches providers that never answer.
+    const attempt = provider.complete(request);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expiry = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new ProviderError(provider.name, 'timeout', `${provider.name}: attempt exceeded ${budgetMs}ms`, {
+            retryable: true,
+          }),
+        );
+      }, budgetMs);
+      timer.unref();
+    });
+    try {
+      return await Promise.race([attempt, expiry]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
 /**
@@ -232,14 +275,46 @@ export class AIRouter {
     return 0;
   }
 
-  /** Normalises anything a provider throws into a ProviderError. */
-  private toProviderError(error: unknown, provider: AiProvider): ProviderError {
-    if (error instanceof ProviderError) return error;
+  /**
+   * Normalises anything a provider throws into a ProviderError.
+   *
+   * The caller's signal decides WHY the request ended, not the shape of the
+   * error: only a cancelled request becomes the terminal `aborted` kind. A
+   * provider that aborts on its own (its own timeout, a dropped socket) is a
+   * provider fault - it must fall through to the next candidate instead of
+   * ending the chain.
+   */
+  private toProviderError(error: unknown, provider: AiProvider, callerAborted: boolean): ProviderError {
+    if (error instanceof ProviderError) {
+      if (callerAborted) {
+        // The request was cancelled: whatever the provider called the error,
+        // the failure belongs to the caller, not to the provider.
+        return new ProviderError(provider.name, 'aborted', error.message, {
+          statusCode: error.statusCode,
+          retryable: false,
+          cause: error,
+        });
+      }
+      if (error.kind === 'aborted') {
+        // The provider aborted by itself: a provider fault, not a cancelled
+        // request, so it must not stop the chain.
+        return new ProviderError(provider.name, 'unknown', error.message, {
+          statusCode: error.statusCode,
+          cause: error,
+        });
+      }
+      return error;
+    }
     if (isAbortError(error)) {
-      return new ProviderError(provider.name, 'aborted', `${provider.name}: request aborted`, {
-        cause: error,
-        retryable: false,
-      });
+      return new ProviderError(
+        provider.name,
+        callerAborted ? 'aborted' : 'unknown',
+        `${provider.name}: request aborted`,
+        {
+          cause: error,
+          retryable: false,
+        },
+      );
     }
     return new ProviderError(provider.name, 'unknown', `${provider.name}: ${errorMessage(error)}`, {
       cause: error,

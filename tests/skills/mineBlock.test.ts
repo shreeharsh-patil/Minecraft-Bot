@@ -52,15 +52,25 @@ describe('MineBlockSkill', () => {
     const skill = new MineBlockSkill(facade);
     const test = createTestContext();
 
-    const running = skill.execute({ blockName: 'oak_log', count: 20 }, test.ctx);
-    setTimeout(() => test.abort(), 40);
+    // Cancel from the walk that precedes the fourth dig, so the run always
+    // stops at the same place. The old version used a 40ms timer: when it
+    // landed in the middle of a dig, the block was dug but not counted and
+    // the assertion below (dug == mined) broke.
+    const originalMove = facade.moveToPosition.bind(facade);
+    let walks = 0;
+    facade.moveToPosition = async (target, options) => {
+      walks += 1;
+      if (walks === 4) test.abort();
+      return originalMove(target, options);
+    };
 
-    const result = await running;
+    const result = await skill.execute({ blockName: 'oak_log', count: 20 }, test.ctx);
 
     const mined = result.count ?? 0;
     expect(result.ok).toBe(false);
     expect(mined).toBeGreaterThan(0);
     expect(mined).toBeLessThan(20);
+    expect(mined).toBe(3);
     expect(result.remaining).toBe(20 - mined);
     expect(facade.dugPositions).toHaveLength(mined);
   });

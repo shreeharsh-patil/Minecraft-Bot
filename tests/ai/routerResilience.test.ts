@@ -129,7 +129,7 @@ describe('router - fair attempt budgets', () => {
     expect(fallback.calls).toBe(1);
   });
 
-  it('splits the deadline evenly between two candidates', async () => {
+  it('gives the first candidate only a fair share of the deadline', async () => {
     const router = makeRouter({ requestTimeoutMs: 1_000 });
     const seen: number[] = [];
     const record = (name: string, delayMs: number) => async (req: CompletionRequest): Promise<CompletionResult> => {
@@ -137,15 +137,29 @@ describe('router - fair attempt budgets', () => {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       return { text: `{"actions":[{"type":"stop"}]}`, latencyMs: delayMs, model: name };
     };
-    router.pool.register(new FakeProvider('openai', record('openai', 10)), 'fast');
+    // The FIRST candidate fails, so the second one is really attempted and
+    // really gets a budget of its own. (With two healthy candidates the first
+    // one answers and the second is never budgeted at all.)
+    router.pool.register(
+      new FakeProvider('openai', (req: CompletionRequest) => {
+        seen.push(req.timeoutMs);
+        return Promise.reject(new ProviderError('openai', 'server_error', 'openai: 503', { retryable: true }));
+      }),
+      'fast',
+    );
     router.pool.register(new FakeProvider('groq', record('groq', 10)), 'fast');
 
-    await router.complete(request(1_000), 'fast');
+    const result = await router.complete(request(1_000), 'fast');
 
-    // Neither candidate may take the whole deadline: the first one gets its
-    // share, not "everything except a tiny reserve".
+    expect(result.provider).toBe('groq');
+    expect(result.attempts).toBe(2);
+    // Both candidates were given a budget...
+    expect(seen).toHaveLength(2);
+    // ...the first one got its share, not "everything except a tiny reserve"...
     expect(seen[0]).toBeLessThanOrEqual(600);
     expect(seen[0]).toBeGreaterThanOrEqual(400);
+    // ...and the fallback was not starved.
+    expect(seen[1]).toBeGreaterThanOrEqual(400);
   });
 });
 

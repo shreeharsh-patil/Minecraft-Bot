@@ -57,8 +57,15 @@ export async function waitUntil(
   while (Date.now() < deadline) {
     if (opts.signal?.aborted) throw new AbortedError();
     if (predicate()) return;
-    await sleep(interval, opts.signal);
+    // Never sleep past the deadline: a poll interval longer than the budget
+    // that is left would stretch the caller's timeout.
+    const remaining = Math.max(0, deadline - Date.now());
+    await sleep(Math.min(interval, remaining), opts.signal);
   }
+  // The condition may have become true during the final sleep. Reporting a
+  // timeout for a condition that already holds is a false negative.
+  if (opts.signal?.aborted) throw new AbortedError();
+  if (predicate()) return;
   throw new Error(opts.description ?? 'Timed out waiting for condition');
 }
 
@@ -72,6 +79,11 @@ export async function withTimeout<T>(
   description = 'Operation',
   signal?: AbortSignal,
 ): Promise<T> {
+  // The work belongs to us from the moment it is handed over. Attach a
+  // rejection handler up front so a late failure - after an abort, or after
+  // we already timed out - can never surface as an unhandled rejection and
+  // take the whole process down with it.
+  void work.catch(() => undefined);
   if (signal?.aborted) throw new AbortedError();
   const timeout = createDeferred<never>();
   const timer = setTimeout(() => {

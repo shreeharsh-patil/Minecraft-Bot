@@ -48,14 +48,18 @@ describe('ChatResponder - the server line limit', () => {
     const { responder, lines } = recorder();
     await responder.announce('z'.repeat(1_000));
 
-    expect(lines[0]?.length ?? 0).toBeLessThanOrEqual(SERVER_LINE_LIMIT);
+    // The announcement has to be emitted at all: an empty line would make the
+    // length check below pass for entirely the wrong reason.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.length ?? 0).toBe(SERVER_LINE_LIMIT);
   });
 
   it('never exceeds the limit even with a long name prefix', async () => {
     const { responder, lines } = recorder();
     await responder.send('A'.repeat(120), 'w'.repeat(1_000));
 
-    expect(lines[0]?.length ?? 0).toBeLessThanOrEqual(SERVER_LINE_LIMIT);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.length ?? 0).toBe(SERVER_LINE_LIMIT);
   });
 
   it('sends a short reply unchanged', async () => {

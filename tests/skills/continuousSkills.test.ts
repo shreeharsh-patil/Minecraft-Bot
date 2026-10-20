@@ -101,14 +101,25 @@ describe('the continuous skills do not spam chat', () => {
   });
 
   it('says once that it cannot see the player while guarding', async () => {
+    // Fake timers make the tick count exact: the guard ticks every 500ms, so
+    // a 700ms guard runs exactly two ticks. The old version used the wall
+    // clock, and on a slow machine only one tick happened - which made the
+    // assertion below pass without the chat gate ever being challenged.
+    vi.useFakeTimers();
     const facade = new FakeMinecraftFacade();
     const skill = new DefendSkill(facade);
     const test = createTestContext();
 
-    await skill.execute({ player: 'Ghost', durationMs: 700 }, test.ctx);
+    const running = skill.execute({ player: 'Ghost', durationMs: 700 }, test.ctx);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await running;
 
     const spoken = test.messages.filter((message) => message.includes("can't see"));
     expect(spoken).toHaveLength(1);
+    // The guard really did look for the player more than once, so the single
+    // message is the chat gate doing its job.
+    expect(facade.stopMovingCount).toBeGreaterThan(1);
+    expect(result.ok).toBe(true);
   });
 });
 

@@ -56,7 +56,11 @@ describe('SaySkill - the redaction gate', () => {
 
     await createSaySkill(facade).execute({ message: 'connected to 192.168.0.5:25565' });
 
+    // The line has to be posted at all: an empty line would make the check
+    // below pass for entirely the wrong reason.
+    expect(facade.chatMessages).toHaveLength(1);
     expect(facade.chatMessages[0] ?? '').not.toContain('192.168.0.5');
+    expect(facade.chatMessages[0] ?? '').toContain('host');
   });
 
   it('posts an ordinary message unchanged', async () => {
@@ -73,6 +77,13 @@ describe('SaySkill - the redaction gate', () => {
 
     await createSaySkill(facade).execute({ message: 'x'.repeat(1_000) });
 
-    expect((facade.chatMessages[0] ?? '').length).toBeLessThanOrEqual(256);
+    // The line has to be posted at all: an empty line would make the length
+    // check below pass for entirely the wrong reason.
+    expect(facade.chatMessages).toHaveLength(1);
+    const sent = facade.chatMessages[0] ?? '';
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.length).toBeLessThanOrEqual(256);
+    // An over-long line is truncated, not dropped.
+    expect(sent.endsWith('…')).toBe(true);
   });
 });

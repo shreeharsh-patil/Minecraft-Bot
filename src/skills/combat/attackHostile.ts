@@ -43,26 +43,49 @@ export class AttackHostileSkill implements Skill<AttackParams> {
         0,
       );
     }
+    const fought = wanted.length > 0 ? wanted : target.name;
 
     const deadline = Date.now() + ATTACK_DURATION_MS;
     let hits = 0;
     let ticks = 0;
+    /** Set when the mob vanished (died or walked off) instead of being fought. */
+    let targetLost = false;
 
     try {
       while (!ctx.signal.aborted && Date.now() < deadline) {
         ticks += 1;
         // The mob moves, so the position captured at the start is stale by
         // now: look it up again every tick and fight where it IS.
-        const fresh = this.findTarget(radius, wanted, target);
-        if (!fresh) break;
+        let fresh = this.findTarget(radius, wanted, target);
+        if (!fresh) {
+          targetLost = true;
+          break;
+        }
 
-        const distance = distance3(this.facade.getPosition(), fresh.position);
-        if (distance > ENGAGE_RANGE) {
+        if (distance3(this.facade.getPosition(), fresh.position) > ENGAGE_RANGE) {
           const moved = await navigateToPosition(this.facade, ctx, fresh.position, {
             description: `Closing in on ${fresh.name}`,
             arriveDistance: ENGAGE_RANGE,
           });
           if (moved.status === 'cancelled') break;
+          // Walking takes time and the mob keeps moving - it may even die
+          // while the bot walks - so the position the walk aimed at is
+          // stale by now: look the mob up again and fight where it IS.
+          const current = this.findTarget(radius, wanted, target);
+          if (!current) {
+            targetLost = true;
+            break;
+          }
+          fresh = current;
+        }
+
+        // Only swing at a mob that is within reach: the server ignores an
+        // attack on a target that is too far away, so counting that swing
+        // would report a hit that never landed.
+        if (distance3(this.facade.getPosition(), fresh.position) > ENGAGE_RANGE) {
+          reportProgress(ctx, ticks, null, `closing in on ${fresh.name}`);
+          await sleep(ATTACK_TICK_MS, ctx.signal);
+          continue;
         }
 
         this.facade.lookAt(fresh.position, true);
@@ -81,14 +104,20 @@ export class AttackHostileSkill implements Skill<AttackParams> {
       }
 
       if (ctx.signal.aborted) {
-        return { ok: false, detail: `Stopped fighting ${wanted.length > 0 ? wanted : target.name}.`, count: hits };
+        return { ok: false, detail: `Stopped fighting ${fought}.`, count: hits };
       }
-      return { ok: hits > 0, detail: `Fought ${wanted.length > 0 ? wanted : target.name} (${hits} swings).`, count: hits };
+      if (hits === 0) {
+        // Nothing landed: say what happened instead of claiming a fight
+        // that did not happen.
+        if (targetLost) return failedResult(`The ${fought} is gone.`, 0);
+        return failedResult(`I could not reach the ${fought}.`, 0);
+      }
+      return { ok: true, detail: `Fought ${fought} (${hits} swings).`, count: hits };
     } catch (error) {
       if (isCancellation(error)) {
-        return { ok: false, detail: `Stopped fighting ${wanted.length > 0 ? wanted : target.name}.`, count: hits };
+        return { ok: false, detail: `Stopped fighting ${fought}.`, count: hits };
       }
-      return failedResult(`Fighting ${wanted.length > 0 ? wanted : target.name} failed: ${describeError(error)}`, hits);
+      return failedResult(`Fighting ${fought} failed: ${describeError(error)}`, hits);
     }
   }
 
@@ -107,10 +136,49 @@ export class AttackHostileSkill implements Skill<AttackParams> {
     const candidates = this.facade
       .getNearbyEntities(radius)
       .filter((entity) => isHostile(entity))
-      .filter((entity) => wanted.length > 0 || anchor === undefined || matchesAnchor(entity, anchor))
+      .filter((entity) => isTheTarget(entity, wanted, anchor))
       .sort((a, b) => a.distance - b.distance);
     return candidates[0] ?? null;
   }
+}
+
+/**
+ * Is this entity the one to fight?
+ *
+ * A requested name wins: "attack the skeleton" must not end up hitting the
+ * creeper that happens to be closer. Without a name the fight stays on the
+ * mob it started with.
+ */
+function isTheTarget(entity: EntitySummary, wanted: string, anchor?: EntitySummary): boolean {
+  if (wanted.length > 0) return matchesName(entity, wanted);
+  return anchor === undefined || matchesAnchor(entity, anchor);
+}
+
+/**
+ * Does this entity carry the name that was asked for?
+ *
+ * The comparison ignores case and treats underscores and spaces as the same
+ * thing, so "wither_skeleton" and "wither skeleton" name the same mob.
+ */
+function matchesName(entity: EntitySummary, wanted: string): boolean {
+  return nameForms(entity.name).some((form) => nameForms(wanted).includes(form));
+}
+
+/**
+ * The spellings one mob name can take.
+ *
+ * Minecraft names mobs in the singular ("zombie") while a player asks for
+ * them in the plural ("zombies"), so the plural is folded back as well. Both
+ * sides are folded, so "zombies" and "zombie" meet in the middle.
+ */
+function nameForms(name: string): string[] {
+  const plain = name.trim().toLowerCase().replace(/_/g, ' ');
+  const forms = [plain];
+  // "witches" -> "witch", "vexes" -> "vex"
+  if (plain.endsWith('es')) forms.push(plain.slice(0, -2));
+  // "zombies" -> "zombie", "skeletons" -> "skeleton"
+  if (plain.endsWith('s') && !plain.endsWith('ss')) forms.push(plain.slice(0, -1));
+  return forms;
 }
 
 /**

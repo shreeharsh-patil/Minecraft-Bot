@@ -4,6 +4,9 @@
  * Runs until `ctx.signal` aborts or the (always bounded) duration elapses.
  * Always stops moving on the way out, and never throws for ordinary combat
  * conditions.
+ *
+ * A threat that is not in reach yet is closed in on: a swing from further
+ * away than the attack range hits nothing.
  */
 import { MOVEMENT } from '../../config/constants.js';
 import type { MinecraftFacade } from '../../types/facade.js';
@@ -23,6 +26,7 @@ import {
   failedResult,
   isCancellation,
   navigateToPlayer,
+  navigateToPosition,
   reportProgress,
   resolveEntityId,
 } from '../internal/helpers.js';
@@ -34,8 +38,16 @@ const log = createLogger({ level: 'info' }).child({ layer: 'skills', skill: 'def
 const GUARD_TICK_MS = 500;
 /** Beyond this range from the guarded player, the guard walks back. */
 const DEFAULT_GUARD_RADIUS = 8;
-/** Attack range. */
+/**
+ * Attack range: a swing only lands on a mob this close.
+ *
+ * The server ignores an attack that was sent from further away, so a swing
+ * at a mob six blocks off hits nothing at all - the guard has to close the
+ * distance first.
+ */
 const ATTACK_RANGE = 3;
+/** How long the guard may spend walking up to a mob before it moves on. */
+const ENGAGE_TIMEOUT_MS = 2_000;
 /**
  * How long a guard runs when the action does not say.
  *
@@ -157,7 +169,23 @@ export class DefendSkill implements Skill<DefendParams> {
    */
   private async engage(target: EntitySummary, ctx: ExecutionContext): Promise<'cancelled' | 'attacked' | 'missed'> {
     if (ctx.signal.aborted) return 'cancelled';
-    if (distance3(this.facade.getPosition(), target.position) > ATTACK_RANGE * 2) return 'missed';
+
+    const reach = distance3(this.facade.getPosition(), target.position);
+    // A mob that is hopelessly far away is not this tick's fight.
+    if (reach > ATTACK_RANGE * 2) return 'missed';
+    if (reach > ATTACK_RANGE) {
+      // Close the distance instead of swinging at the air: an attack sent
+      // from further than the attack range is ignored by the server.
+      const moved = await navigateToPosition(this.facade, ctx, target.position, {
+        description: `Closing in on ${target.name}`,
+        arriveDistance: ATTACK_RANGE - 1,
+        timeoutMs: ENGAGE_TIMEOUT_MS,
+      });
+      if (moved.status === 'cancelled') return 'cancelled';
+      // The mob may have moved, or the path may have failed: either way the
+      // swing is only counted when the mob really is in reach.
+      if (distance3(this.facade.getPosition(), target.position) > ATTACK_RANGE) return 'missed';
+    }
 
     this.facade.lookAt(target.position, true);
     const id = resolveEntityId(target);
@@ -167,21 +195,29 @@ export class DefendSkill implements Skill<DefendParams> {
       await this.useWeapon(ctx);
       return 'attacked';
     }
+    // A sword in the hand first: the guard would otherwise fight whatever it
+    // happens to hold - or bare hands.
+    await this.equipWeapon(ctx);
     this.facade.attackEntity(id);
     return 'attacked';
   }
 
-  private async useWeapon(ctx: ExecutionContext): Promise<void> {
+  /** A sword in the hand, ready for the next swing. */
+  private async equipWeapon(ctx: ExecutionContext): Promise<void> {
     if (ctx.signal.aborted) return;
     const held = this.facade.heldItem();
-    if (held === null || !held.includes('sword')) {
-      const weapon = ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'wooden_sword'].find(
-        (candidate) => this.facade.countItem(candidate) > 0,
-      );
-      if (weapon !== undefined) {
-        await this.facade.equipItem(weapon);
-      }
+    if (held !== null && held.includes('sword')) return;
+    const weapon = ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'wooden_sword'].find(
+      (candidate) => this.facade.countItem(candidate) > 0,
+    );
+    if (weapon !== undefined) {
+      await this.facade.equipItem(weapon);
     }
+  }
+
+  /** A sword in the hand and a swing: the fallback for a summary with no id. */
+  private async useWeapon(ctx: ExecutionContext): Promise<void> {
+    await this.equipWeapon(ctx);
     // A swing keeps the guard facing and attacking even without an entity id.
     await this.facade.useItem();
   }

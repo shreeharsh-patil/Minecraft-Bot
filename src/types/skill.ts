@@ -1,7 +1,7 @@
 /** Interfaces implemented by the skill layer, consumed by the executor. */
-import type { ActionType } from '../types/actions.js';
-import type { BlockPos, Vec3Like } from '../types/world.js';
-import type { ExecutionContext } from '../types/task.js';
+import type { ActionType, BotAction } from './actions.js';
+import type { BlockPos, Vec3Like } from './world.js';
+import type { ExecutionContext } from './task.js';
 
 export interface SkillResult {
   ok: boolean;
@@ -12,8 +12,16 @@ export interface SkillResult {
   remaining?: number;
 }
 
-export interface SkillInput {
-  action: unknown;
+/**
+ * What a skill is called with: the validated action for its own action type
+ * and the execution context.
+ *
+ * This mirrors `Skill.execute`, whose `params` is this `action`. The action
+ * is typed rather than `unknown`, so a caller cannot hand a skill something
+ * that is not an action at all.
+ */
+export interface SkillInput<TAction extends BotAction = BotAction> {
+  action: TAction;
   ctx: ExecutionContext;
 }
 
@@ -25,7 +33,15 @@ export interface SkillInput {
 export interface Skill<TParams = unknown> {
   /** Must equal the ActionType this skill handles. */
   readonly name: ActionType;
-  /** Which bodies this skill needs exclusive access to. */
+  /**
+   * Which bodies this skill needs exclusive access to.
+   *
+   * A skill may need more than one: the guard fights (combat) AND walks
+   * back to the player it protects (movement). The scheduler arbitrates on
+   * ONE group per task, so these groups are what the skill declares, not
+   * what the scheduler enforces - `src/executor/actionExecutor.ts` maps each
+   * action type to a single group of its own.
+   */
   readonly conflictGroups: readonly string[];
   execute(params: TParams, ctx: ExecutionContext): Promise<SkillResult>;
 }

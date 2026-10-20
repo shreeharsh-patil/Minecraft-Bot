@@ -111,6 +111,23 @@ describe('the validator accepts the shapes players and models use', () => {
   });
 });
 
+describe('the validator refuses a chat line the server would run', () => {
+  it('rejects a say message that starts with a slash', () => {
+    // A leading slash is a SERVER COMMAND, not chat: "/op @a" would be
+    // executed by the server the moment the bot sends it.
+    expect(validateAction({ type: 'say', message: '/op @a' }).valid).toBe(false);
+    expect(validateAction({ type: 'say', message: '/login hunter2' }).valid).toBe(false);
+    expect(validateAction({ type: 'say', message: '\\op' }).valid).toBe(false);
+  });
+
+  it('still allows an ordinary chat line', () => {
+    const result = validateAction({ type: 'say', message: 'Done! I mined 16 oak logs.' });
+
+    expect(result.valid).toBe(true);
+    expect(result.action).toMatchObject({ message: 'Done! I mined 16 oak logs.' });
+  });
+});
+
 describe('ActionLimits - the remaining budget', () => {
   it('reports what is left of the per-task budget', () => {
     const limits = new ActionLimits(safety({ maxMiningBlocksPerTask: 10, maxBuildBlocksPerTask: 4 }));

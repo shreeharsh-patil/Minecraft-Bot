@@ -83,7 +83,11 @@ export async function createBot(options: CreateBotOptions): Promise<ConnectedBot
     // half-open. Repeated retries against a slow host would leak connections,
     // so always tear the client down before surfacing the error.
     try {
-      bot.quit('spawn failed');
+      // `bot.quit` only exists once the handshake completed - mineflayer
+      // defines it in its kick plugin - so it is missing exactly when the
+      // connection fails early. `bot.end` is always there and does the same
+      // thing (quit is nothing but a wrapper around it).
+      bot.end('spawn failed');
     } catch {
       // The client may never have reached a quittable state; nothing to do.
     }
@@ -118,7 +122,7 @@ export async function createBot(options: CreateBotOptions): Promise<ConnectedBot
 }
 
 /**
- * Resolves on `spawn`, rejects on error/timeout/kick.
+ * Resolves on `spawn`, rejects on error/timeout/kick/closed connection.
  *
  * Exported for tests: the rest of `createBot` needs a live server, but this
  * is the part that decides whether the bot ever comes online.
@@ -131,6 +135,7 @@ export function waitForSpawn(bot: Bot, logger: Logger, timeoutMs: number): Promi
       bot.removeListener('spawn', onSpawn);
       bot.removeListener('error', onError);
       bot.removeListener('kicked', onKicked);
+      bot.removeListener('end', onEnd);
       clearTimeout(timer);
     };
 
@@ -156,12 +161,24 @@ export function waitForSpawn(bot: Bot, logger: Logger, timeoutMs: number): Promi
       reject(new Error(`kicked while connecting: ${text}`));
     };
 
+    // A server that drops the connection during the handshake (a proxy, a
+    // firewall, a server that gives up) closes the socket without an error:
+    // without this the bot would sit here until the spawn timeout expires.
+    const onEnd = (reason: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const text = typeof reason === 'string' ? reason : 'connection closed';
+      reject(new Error(`connection closed before spawn: ${text}`));
+    };
+
     // One path per outcome: the previous version raced two independent
     // waiters, which left a stray 'spawn' listener behind on the timeout
     // path and could reject after the promise had already resolved.
     bot.on('spawn', onSpawn);
     bot.on('error', onError);
     bot.on('kicked', onKicked);
+    bot.on('end', onEnd);
 
     const timer = setTimeout(() => {
       if (settled) return;

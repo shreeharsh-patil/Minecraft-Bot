@@ -267,9 +267,46 @@ describe('ChatListener.route - deterministic commands never reach the AI', () =>
   });
 
   it('sends no deterministic command to the AI', () => {
-    for (const text of ['!come', '!goto 1 2 3', '!follow Bob', '!guard Bob', '!eat', '!equip axe', '!drop dirt 2', '!mine dirt', '!deposit dirt', '!withdraw dirt 3']) {
-      expect(h.listener.route(message('Alice', text)).kind).not.toBe('ai');
+    // A generous rate limit: with the default budget the tail of the list
+    // would be answered "rate-limited", and "not the AI" would be true for
+    // them without anything ever being dispatched.
+    const roomy = harness({ MAX_COMMANDS_PER_WINDOW: '100' });
+    // Every deterministic command the parser can convert: a command that is
+    // missing from this list would silently start costing an AI call.
+    const deterministic = [
+      '!come',
+      '!goto 1 2 3',
+      '!follow Bob',
+      '!guard Bob',
+      '!stay',
+      '!eat',
+      '!equip axe',
+      '!drop dirt 2',
+      '!mine dirt',
+      '!deposit dirt',
+      '!withdraw dirt 3',
+      '!pickup dirt',
+    ];
+    for (const text of deterministic) {
+      const route = roomy.listener.route(message('Alice', text));
+      // Dispatched by the listener itself - never handed to the planner and
+      // never swallowed (ignored) before it got that far.
+      expect(route.kind, text).not.toBe('ai');
+      expect(route.kind, text).not.toBe('ignored');
     }
+  });
+
+  it('routes the less obvious deterministic commands to a real action', () => {
+    // "!stay" and "!pickup" are parsed into actions like any other command;
+    // they must not fall through to the local handler ("unknown command").
+    expect(h.listener.route(message('Alice', '!stay'))).toMatchObject({
+      kind: 'deterministic',
+      action: { type: 'wait' },
+    });
+    expect(h.listener.route(message('Alice', '!pickup dirt'))).toMatchObject({
+      kind: 'deterministic',
+      action: { type: 'pickup_items', item: 'dirt' },
+    });
   });
 
   it('answers a malformed deterministic command with a usage error', () => {

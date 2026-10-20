@@ -21,6 +21,7 @@ import {
   extractCount,
   findVocabEntries,
   matchPhrase,
+  mentionsLogSpecies,
   normalize,
   normalizeMinimal,
   safeQuote,
@@ -32,6 +33,7 @@ import {
 import type { PlanRequest, PlanResult } from './planner.js';
 import type { BotAction } from '../types/actions.js';
 import { validateAction } from '../executor/validator.js';
+import { DEFAULT_MAX_MINE, DEFAULT_MAX_WAIT_MS, MAX_DROP_COUNT } from '../safety/actionLimits.js';
 import { detectInjectedIntent } from '../safety/chatInjectionGuard.js';
 import { silentLogger } from '../utils/logger.js';
 import type { Logger } from '../utils/logger.js';
@@ -52,10 +54,21 @@ const DEFAULT_MAX_ACTIONS = 8;
 const UNSURE_FALLBACK =
   "I couldn't work out what that means. Try !help or something like 'follow me', 'mine 20 stone', 'equip sword'.";
 
-/** Parameter clamps (kept in step with validator ceilings). */
+/**
+ * Parameter clamps (kept in step with validator ceilings).
+ *
+ * The numbers are taken from the shared safety limits rather than copied:
+ * a clamp that is looser than the validator's own ceiling produces an
+ * action the validator then rejects, and the request is silently lost.
+ */
 const LIMITS = {
-  count: 512,
+  count: DEFAULT_MAX_MINE,
+  /** Longest look-at the validator accepts. */
   durationMs: 60_000,
+  /** Longest wait the validator AND the executor accept. */
+  waitMs: DEFAULT_MAX_WAIT_MS,
+  /** Longest drop the validator AND the executor accept. */
+  dropCount: MAX_DROP_COUNT,
   radius: 32,
 } as const;
 
@@ -89,11 +102,21 @@ function phraseStrength(words: readonly string[], phrase: string): number {
   return match.matched ? match.strength : 0;
 }
 
-/** Sum of phrase strengths for an intent. */
+/**
+ * Sum of phrase strengths for an intent.
+ *
+ * A longer matched phrase is a more specific signal than a single word that
+ * merely happens to be a synonym: "collect the drops" is a pickup request,
+ * not the mining verb "collect". The bonus stays small so an exact match
+ * still outranks a typo-corrected one, as `matchPhrase` promises.
+ */
 function intentScore(words: readonly string[], name: keyof typeof PHRASES): number {
   let total = 0;
   for (const phrase of PHRASES[name] ?? []) {
-    total = Math.max(total, phraseStrength(words, phrase));
+    const strength = phraseStrength(words, phrase);
+    if (strength === 0) continue;
+    const specificity = 1 + (phrase.split(' ').length - 1) * 0.05;
+    total = Math.max(total, strength * specificity);
   }
   return total;
 }
@@ -228,10 +251,14 @@ export class LocalPlanner {
     // or a verb phrase with a quantity ("mine 20 logs"). Coordinates are
     // detected first because count extraction would tear them apart.
     const clauseCoordinates = this.findCoordinates(clause.words);
+    // The world target is resolved first: the quantity that belongs to the
+    // named thing is the one right next to it, so the target anchors the
+    // count search ("mine 20 logs and 5 stone" is five stone, not twenty).
+    const target = this.resolveTarget(clause.words, ctx);
     let count: number | undefined;
     let restWords = clause.words;
     if (clauseCoordinates === undefined) {
-      const countExtraction = extractCount(rawClause);
+      const countExtraction = extractCount(normalize(rawClause), target?.index);
       if (countExtraction) {
         count = countExtraction.count;
         restWords = tokenize(countExtraction.rest);
@@ -275,13 +302,20 @@ export class LocalPlanner {
         if (hasWord(words, 'from', 'out')) addScore('withdraw', 0.4);
       }
     }
-    // Coordinates sometimes carry the movement intent by themselves.
-    if (clauseCoordinates !== undefined) addScore('goto', 1.2);
+    // Coordinates carry the movement intent by themselves - but only when
+    // no movement or look verb was matched, so "look at 100 64 -200" stays
+    // a look instead of turning into a walk.
+    if (
+      clauseCoordinates !== undefined &&
+      scores.get('goto') === undefined &&
+      scores.get('look') === undefined
+    ) {
+      addScore('goto', 1.2);
+    }
     // "come to me" beats a bare 'go' score.
     if (hasWord(words, 'come') || phraseStrength(words, 'over here') > 0) addScore('come', 0.8);
 
     // The world target steers verb choice ("steak" -> eat, "zombie" -> attack).
-    const target = this.resolveTarget(words, ctx);
     if (target) {
       if (target.entry.kind === 'block') {
         if (hasWord(words, 'give', 'drop', 'toss')) addScore('drop', 0.4);
@@ -428,7 +462,9 @@ export class LocalPlanner {
   private buildWait(clause: { raw: string; words: string[]; count?: number }): { intent: string; actions: BotAction[] } {
     const unit = hasWord(clause.words, 'minutes', 'minute', 'min') ? 60 : 1;
     const seconds = clause.count !== undefined ? clause.count * unit : 3;
-    const durationMs = Math.min(LIMITS.durationMs, Math.max(1_000, Math.round(seconds * 1000)));
+    // The shared ceiling, not a local guess: a longer wait is refused by the
+    // validator and the executor, and the request would be dropped entirely.
+    const durationMs = Math.min(LIMITS.waitMs, Math.max(1_000, Math.round(seconds * 1000)));
     return { intent: 'wait', actions: [{ type: 'wait', durationMs }] };
   }
 
@@ -446,7 +482,9 @@ export class LocalPlanner {
       return this.buildCollect(clause, target.entry, ctx);
     }
     const count = clampCount(clause.count ?? MINE_DEFAULT_COUNT);
-    const grounded = this.groundBlock(target.entry.id, ctx);
+    // The target is already grounded against the world (see resolveTarget),
+    // so it is used as it is: a named species must not be swapped here.
+    const grounded = target.entry.id;
     const actions: BotAction[] = [{ type: 'mine_block', blockName: grounded, count }];
     if (hasWord(clause.words, 'bring', 'deliver', 'carry')) {
       actions.push({ type: 'move_to_player', player: requester, maxDistance: 2 });
@@ -471,7 +509,9 @@ export class LocalPlanner {
   private buildDrop(clause: { raw: string; words: string[]; count?: number }, ctx: CompactContext): { intent: string; actions: BotAction[] } {
     const item = this.resolveItemName(clause, ctx);
     if (!item) return this.sayOnly('Drop what item?');
-    const count = clause.count === undefined ? undefined : clampCount(clause.count, 2304);
+    // The shared drop ceiling: anything above it is refused by the
+    // validator, so the whole request would be dropped.
+    const count = clause.count === undefined ? undefined : clampCount(clause.count, LIMITS.dropCount);
     return {
       intent: 'drop',
       actions: [{ type: 'drop_item', item, where: 'floor', ...(count !== undefined ? { count } : {}) }],
@@ -572,7 +612,7 @@ export class LocalPlanner {
         normalized,
       );
     }
-    if (/^(thanks|thank you|ty|appreciate)/.test(normalized)) {
+    if (/^(thanks|thank you|ty|appreciate)\b/.test(normalized)) {
       return `You're welcome, ${requester}.`;
     }
     if (/\b(joke|funny|make me laugh)\b/.test(normalized)) return this.pick(JOKES, normalized);
@@ -618,14 +658,25 @@ export class LocalPlanner {
       // Search backward: "how many iron swords do you have" points at the last
       // mentioned noun, and real similarity keeps plurals ranking high.
       const hits = [...tokenize(normalized)].reverse()
-        .map((word) => findVocabEntries(word)[0])
-        .filter((hit): hit is NonNullable<typeof hit> => hit !== undefined && hit.strength >= 0.6);
-      const wanted = hits.sort((a, b) => b.strength - a.strength)[0]?.entry;
-      if (wanted) {
-        const total = ctx.inventory.items
-          .filter((item) => item.name === wanted.id || item.name.startsWith(`${wanted.id}_`))
-          .reduce((sum, item) => sum + item.count, 0);
-        return `I count ${total} ${wanted.id.replace(/_/g, ' ')} in my inventory.`;
+        .flatMap((word) => {
+          const match = findVocabEntries(word)[0];
+          return match !== undefined && match.strength >= 0.6 ? [{ word, match }] : [];
+        })
+        .sort((a, b) => b.match.strength - a.match.strength);
+      const wanted = hits[0];
+      if (wanted !== undefined) {
+        // The vocabulary may only know the BLOCK ("diamonds" -> diamond_ore)
+        // while the inventory holds the ITEM ("diamond"), so what the player
+        // actually named is counted first and the vocabulary id is the
+        // fallback - otherwise the bot reports zero for what it holds.
+        const byName = ctx.inventory.items.filter((item) => isSameThing(item.name, wanted.word));
+        const byId = ctx.inventory.items.filter(
+          (item) => item.name === wanted.match.entry.id || item.name.startsWith(`${wanted.match.entry.id}_`),
+        );
+        const matches = byName.length > 0 ? byName : byId;
+        const total = matches.reduce((sum, item) => sum + item.count, 0);
+        const label = byName.length > 0 ? wanted.word : wanted.match.entry.id.replace(/_/g, ' ');
+        return `I count ${total} ${label} in my inventory.`;
       }
     }
     // Static survival school: the tips part of "help others".
@@ -671,16 +722,22 @@ export class LocalPlanner {
    * words. Falls back to verbatim world/inventory names ("spruce_log").
    * Returns a COPY the caller is free to refine; the shared vocabulary and
    * the context are never mutated.
+   *
+   * The word index of the match is returned as well: it anchors the quantity
+   * search, so the count that comes out belongs to the named thing.
    */
-  private resolveTarget(words: readonly string[], ctx: CompactContext): { entry: VocabEntry } | undefined {
+  private resolveTarget(
+    words: readonly string[],
+    ctx: CompactContext,
+  ): { entry: VocabEntry; index: number } | undefined {
     for (let width = Math.min(3, words.length); width >= 1; width--) {
       for (let start = words.length - width; start >= 0; start--) {
         const chunk = words.slice(start, start + width).join(' ');
         const hit = findVocabEntries(chunk)[0];
         if (hit && hit.strength >= 0.65) {
           const entry = { ...hit.entry };
-          if (entry.kind === 'block') entry.id = this.groundBlock(entry.id, ctx);
-          return { entry };
+          if (entry.kind === 'block') entry.id = this.groundBlock(entry.id, ctx, chunk);
+          return { entry, index: start };
         }
       }
     }
@@ -690,14 +747,20 @@ export class LocalPlanner {
     ];
     for (const name of worldNames) {
       const index = words.findIndex((word) => similarity(word, name) >= 0.86);
-      if (index >= 0) return { entry: { id: name, words: [name], kind: 'block' } };
+      if (index >= 0) return { entry: { id: name, words: [name], kind: 'block' }, index };
     }
     return undefined;
   }
 
-  /** "oak_log" defaults map onto the log species actually standing nearby. */
-  private groundBlock(blockId: string, ctx: CompactContext): string {
-    if (blockId === 'oak_log') {
+  /**
+   * "oak_log" defaults map onto the log species actually standing nearby.
+   *
+   * Generic "logs"/"wood" may be served by the closest tree, but a player
+   * who names a species ("oak logs") gets exactly that species - swapping it
+   * for the nearest tree would mine the wrong block.
+   */
+  private groundBlock(blockId: string, ctx: CompactContext, mention?: string): string {
+    if (blockId === 'oak_log' && (mention === undefined || !mentionsLogSpecies(mention))) {
       const nearbyLog = ctx.nearbyBlocks.find((block) => block.name.endsWith('_log'));
       if (nearbyLog) return nearbyLog.name;
     }
@@ -770,7 +833,7 @@ export class LocalPlanner {
       return { ...action, message };
     }
     if (action.type === 'wait') {
-      return { ...action, durationMs: Math.min(LIMITS.durationMs, Math.max(1, Math.round(action.durationMs))) };
+      return { ...action, durationMs: Math.min(LIMITS.waitMs, Math.max(1, Math.round(action.durationMs))) };
     }
     if (action.type === 'look_at') {
       const durationMs = action.durationMs === undefined ? undefined : Math.min(LIMITS.durationMs, Math.max(0, action.durationMs));
@@ -784,6 +847,18 @@ export class LocalPlanner {
 
 function clampCount(value: number, max: number = LIMITS.count): number {
   return Math.max(1, Math.min(max, Math.round(value)));
+}
+
+/**
+ * True when an inventory item is the thing the player named.
+ *
+ * Only the plain singular counts: "diamonds" is the stack of diamonds, not
+ * the diamond sword that happens to start with the same word.
+ */
+function isSameThing(itemName: string, word: string): boolean {
+  if (itemName === word) return true;
+  const singular = word.endsWith('s') && !word.endsWith('ss') ? word.slice(0, -1) : word;
+  return itemName === singular;
 }
 
 function clampRadius(value: number): number {

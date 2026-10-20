@@ -4,7 +4,18 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'data/**'],
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'coverage/**',
+      'data/**',
+      // Root-level scratch probes (".scratch-*.ts") are throwaway developer
+      // scripts that belong to no tsconfig project. The type-aware parser
+      // cannot resolve them, and ESLint then aborts the *whole* lint run with
+      // "was not found by the project service" instead of reporting a single
+      // file. Ignore them here so a stray probe can never fail the gate.
+      '.scratch-*.ts',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,

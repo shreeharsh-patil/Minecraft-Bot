@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TaskManager } from '../../src/executor/actionQueue.js';
 import type { TaskHandle } from '../../src/executor/actionQueue.js';
 import type { CreateTaskInput } from '../../src/types/task.js';
-import { silentLogger } from '../../src/utils/logger.js';
+import { silentLogger, createLogger } from '../../src/utils/logger.js';
 
 function input(overrides: Partial<CreateTaskInput> = {}): CreateTaskInput {
   return {
@@ -435,15 +435,32 @@ describe('TaskManager - execute', () => {
   });
 
   it('reports progress and messages through the execution context', async () => {
-    const handle = tasks.start(input({ steps: ['walk', 'arrive'] }));
+    // A capturing logger: with the silent one the task message is thrown
+    // away, so the "messages" half of this test could not fail.
+    const lines: string[] = [];
+    const capturing = createLogger({
+      level: 'info',
+      format: 'json',
+      sink: (line) => {
+        lines.push(line);
+      },
+    });
+    const capturingTasks = new TaskManager(capturing);
+    const handle = capturingTasks.start(input({ steps: ['walk', 'arrive'] }));
 
-    await tasks.execute(handle, (ctx) => {
+    await capturingTasks.execute(handle, (ctx) => {
       ctx.progress({ current: 1, total: 2, fraction: 0.5 });
       ctx.say('on my way');
       return Promise.resolve();
     });
 
     expect(handle.record.progress).toMatchObject({ current: 1, total: 2, fraction: 0.5 });
+
+    const spoken = lines
+      .map((line) => JSON.parse(line) as { msg?: string; message?: unknown })
+      .filter((record) => record.msg === 'task message');
+    expect(spoken).toHaveLength(1);
+    expect(spoken[0]?.message).toBe('on my way');
   });
 });
 describe('TaskManager - pause and resume', () => {

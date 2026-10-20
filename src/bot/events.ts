@@ -40,6 +40,11 @@ export interface WireOptions extends BotEventHandlers {
  * the player list), on older servers it is the plain username. Reading the
  * wrong thing makes the bot MUTE, because the UUID never matches
  * AUTHORIZED_PLAYERS - so the name is resolved from several places.
+ *
+ * The chat component is the strongest source: on 1.19+ the server renders the
+ * message from the chat type and puts the sender into the FIRST entry of the
+ * `with` array. The payload's own `sender` field is null on 1.21.1, so the
+ * component is read from `with[0]`.
  */
 function readChatFields(
   value: unknown,
@@ -112,6 +117,67 @@ function looksLikeUuid(value: string): boolean {
 }
 
 /**
+ * Reads the name of the sender out of the chat component.
+ *
+ * prismarine-chat renders a 1.19+ message from the chat type the server sent:
+ * the sender is the FIRST entry of the `with` array ("Alice" and the message
+ * itself). The `sender` field of the payload is null on 1.21.1, so the
+ * component is the only place the name survives when the player list does not
+ * know the sender - and without it the whole chat line is dropped.
+ *
+ * Only the parsed `with` array counts: prismarine-chat builds it from the
+ * chat type, so its first entry IS the sender. The raw JSON is not read,
+ * because a payload that was never parsed does not prove the parameter order.
+ */
+function readComponentSender(payload: unknown): string | undefined {
+  const record = payload as { sender?: unknown; with?: unknown } | undefined;
+  if (typeof record !== 'object' || record === null) return undefined;
+  const candidates: unknown[] = [
+    record.sender,
+    Array.isArray(record.with) ? record.with[0] : undefined,
+  ];
+  for (const candidate of candidates) {
+    const name = componentName(candidate);
+    if (name !== undefined) return name;
+  }
+  return undefined;
+}
+
+/**
+ * The plain name of a chat component.
+ *
+ * A component is a plain string, an object with a `text` field or a
+ * prismarine-chat message that renders itself. The rendered form is preferred
+ * over the raw `text` field so that the name matches the prefix the server
+ * renders into the line ("<Alice> hello").
+ */
+function componentName(component: unknown): string | undefined {
+  if (typeof component === 'string') return usableName(component);
+  if (typeof component !== 'object' || component === null) return undefined;
+  const record = component as { text?: unknown; toString?: () => string };
+  if (typeof record.toString === 'function' && record.toString !== Object.prototype.toString) {
+    let rendered = '';
+    try {
+      rendered = record.toString();
+    } catch {
+      rendered = '';
+    }
+    const name = usableName(rendered.replace(/^<|>$/g, ''));
+    if (name !== undefined) return name;
+  }
+  if (typeof record.text === 'string') return usableName(record.text);
+  return undefined;
+}
+
+/** A name is only usable when it is neither empty nor raw JSON. */
+function usableName(value: string): string | undefined {
+  const name = value.trim();
+  if (name.length === 0) return undefined;
+  if (name.startsWith('{')) return undefined;
+  return name;
+}
+
+/**
  * Finds the name of the player who sent a chat line.
  *
  * 1. The chat component of the message carries the name on modern versions.
@@ -124,11 +190,8 @@ function resolveSenderName(
   bot?: Bot,
 ): string | undefined {
   // 1. The sender component of the chat message ("Alice").
-  const chatSender = (payload as { sender?: { toString?: () => string } }).sender;
-  if (chatSender && typeof chatSender.toString === 'function') {
-    const name = chatSender.toString().replace(/^<|>$/g, '').trim();
-    if (name.length > 0 && !name.startsWith('{')) return name;
-  }
+  const component = readComponentSender(payload);
+  if (component !== undefined) return component;
 
   if (typeof senderName !== 'string' || senderName.length === 0) return undefined;
 
@@ -156,9 +219,13 @@ export function wireBotEvents(options: WireOptions): () => void {
   const { bot, logger } = options;
   const log = logger.child({ component: 'events' });
   const criticalHealth = options.criticalHealth ?? 6;
+  const criticalHunger = options.criticalHunger ?? 6;
 
   const onMessage = (message: unknown, position: string, senderName?: unknown): void => {
-    void position;
+    // System and action bar lines are not chat from a player: they carry no
+    // sender and their own component may hold a "with" array, so they must
+    // never be mistaken for a message of a player.
+    if (position === 'system' || position === 'game_info') return;
     const fields = readChatFields(message, senderName, bot);
     if (fields === null) return;
     try {
@@ -199,12 +266,35 @@ export function wireBotEvents(options: WireOptions): () => void {
 
   const onDeath = (): void => {
     log.warn('the bot died');
-    options.onDeath?.();
+    try {
+      options.onDeath?.();
+    } catch (error) {
+      log.error('death handler threw', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   };
 
   const onHealth = (): void => {
     if ((bot.health ?? 20) <= criticalHealth) {
-      options.onCritical?.('health', bot.health ?? 0);
+      try {
+        options.onCritical?.('health', bot.health ?? 0);
+      } catch (error) {
+        log.error('critical health handler threw', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    // The hunger bar is sent in the same packet as the health, so the same
+    // event carries it.
+    if ((bot.food ?? 20) <= criticalHunger) {
+      try {
+        options.onCritical?.('hunger', bot.food ?? 0);
+      } catch (error) {
+        log.error('critical hunger handler threw', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   };
 

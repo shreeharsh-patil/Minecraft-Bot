@@ -68,6 +68,36 @@ function usageReply(error: string): string {
   return first === '' ? error : `${first.toUpperCase()}${error.slice(1)}`;
 }
 
+/**
+ * The text of a chat line after the command prefix, or null when the line
+ * is not a command line at all.
+ *
+ * The parser reports a malformed command ("!!stop", "!@") as plain chat,
+ * because it cannot turn it into a command - but a line that starts with
+ * the prefix is still a command line and never a request for the planner.
+ */
+function commandBody(message: string, prefix: string): string | null {
+  const trimmed = message.trim();
+  if (!trimmed.startsWith(prefix)) return null;
+  const body = trimmed.slice(prefix.length).trim();
+  return body.length > 0 ? body : null;
+}
+
+/**
+ * True when a chat line asks the bot to stop.
+ *
+ * The command word is the first word after the prefix, compared without the
+ * punctuation players type around it ("!stop!", "!!stop"): a stop request
+ * must not be missed because of a stray character, and honouring one can
+ * only ever reduce what the bot does.
+ */
+function isStopCommand(message: string, prefix: string): boolean {
+  const body = commandBody(message, prefix);
+  if (body === null) return false;
+  const word = body.split(/\s+/)[0] ?? '';
+  return word.replace(/[^a-z0-9]/gi, '').toLowerCase() === 'stop';
+}
+
 export class ChatListener {
   private readonly deps: ChatListenerDeps;
   private readonly logger: Logger;
@@ -91,7 +121,7 @@ export class ChatListener {
 
     // `!stop` is highest priority. It can only ever reduce what the bot does,
     // so it is honoured for authorized players before other gating.
-    if (parsed.kind === 'command' && parsed.command?.name === 'stop') {
+    if (isStopCommand(message.message, prefix)) {
       if (!auth.isAuthorized(message.username)) {
         return { kind: 'ignored', reason: 'not-authorized' };
       }
@@ -123,6 +153,14 @@ export class ChatListener {
       // An unknown command name is answered by the local handler ("Unknown
       // command: X"), never handed to the planner as if it were a request.
       return { kind: 'local', name, args };
+    }
+
+    // A line that starts with the prefix but is not a command at all - a
+    // typo such as "!!stop" or "!@" - is answered here as well: the command
+    // surface is the only thing the prefix may introduce, so a command
+    // line must never reach the planner.
+    if (commandBody(message.message, prefix) !== null) {
+      return { kind: 'usage', message: `Unknown command. Try ${prefix}help` };
     }
 
     return { kind: 'ai', text: parsed.text };

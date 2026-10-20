@@ -8,6 +8,12 @@
  *
  * Note the timer resets whenever *any authorized human* is online, so a player
  * can idle in chat and the bot will keep working for them.
+ *
+ * "Online" is an identity question, not a spatial one: the monitor asks the
+ * facade for the server's tab list, which also contains players the client
+ * has no entity for (they are far away, or their entity has not been spawned
+ * yet). A purely spatial scan would report "nobody is here" and hang up on an
+ * owner who is online in a mine 200 blocks away.
  */
 import type { MinecraftFacade } from '../types/facade.js';
 import type { PresenceConfig } from '../config/config.js';
@@ -21,6 +27,31 @@ export interface PresenceVerdict {
   reason: PresenceReason;
   /** Seconds since an authorized human was last seen. */
   secondsSinceHuman: number | null;
+}
+
+/**
+ * Radius of the spatial scan used when the facade cannot report the tab
+ * list.
+ *
+ * It asks for EVERY player the client knows about: the server only sends the
+ * player entities it tracks, so a fixed radius would only ever cut off
+ * owners who are online but far away.
+ */
+const PRESENCE_SCAN_RADIUS = Number.POSITIVE_INFINITY;
+
+/** A player that is online. A tab-list entry carries no position. */
+export interface OnlinePlayer {
+  name: string;
+}
+
+/**
+ * Optional facade capability: every player that is ONLINE on the server.
+ *
+ * The tab list is the authoritative source for presence - it is the server's
+ * own list of connected players, independent of how far away they are.
+ */
+export interface OnlinePlayerSource {
+  getOnlinePlayers?: () => readonly OnlinePlayer[];
 }
 
 export class HumanPresenceMonitor {
@@ -85,7 +116,7 @@ export class HumanPresenceMonitor {
       return this.remember(now, { shouldStay: true, reason: 'disabled', secondsSinceHuman: null });
     }
 
-    const players = this.facade.getNearbyPlayers(64);
+    const players = this.onlinePlayers();
     let sawAuthorized = false;
     for (const player of players) {
       if (!this.isAuthorized(player.name)) continue;
@@ -105,10 +136,17 @@ export class HumanPresenceMonitor {
       });
     }
 
-    const since = this.lastHumanSeen === null ? null : (now - this.lastHumanSeen) / 1000;
+    // No reference point yet (the monitor was never started): the grace
+    // period starts now instead of the timeout firing on the very first
+    // check and hanging up on a player who is still on their way.
+    if (this.lastHumanSeen === null) {
+      this.lastHumanSeen = now;
+    }
+
+    const since = (now - this.lastHumanSeen) / 1000;
     const timeout = this.config.timeoutSeconds;
 
-    if (since !== null && since < timeout) {
+    if (since < timeout) {
       return this.remember(now, {
         shouldStay: true,
         reason: 'authorized-human-present',
@@ -117,7 +155,7 @@ export class HumanPresenceMonitor {
     }
 
     this.logger.warn('no authorized human online - disconnecting', {
-      secondsSinceHuman: since === null ? null : Math.round(since),
+      secondsSinceHuman: Math.round(since),
       timeoutSeconds: timeout,
     });
     this.stop();
@@ -125,8 +163,30 @@ export class HumanPresenceMonitor {
     return this.remember(now, {
       shouldStay: false,
       reason: 'timeout',
-      secondsSinceHuman: since === null ? null : Math.round(since),
+      secondsSinceHuman: Math.round(since),
     });
+  }
+
+  /**
+   * The players that are online right now.
+   *
+   * The tab list wins over the spatial scan: an authorized human who is
+   * online but out of range (or whose entity has not arrived yet) is still
+   * online, and a spatial query alone would report "nobody is here".
+   */
+  private onlinePlayers(): readonly OnlinePlayer[] {
+    const source = this.facade as MinecraftFacade & OnlinePlayerSource;
+    if (typeof source.getOnlinePlayers === 'function') {
+      return source.getOnlinePlayers().filter((player) => !this.isSelf(player.name));
+    }
+    return this.facade
+      .getNearbyPlayers(PRESENCE_SCAN_RADIUS)
+      .filter((player) => !this.isSelf(player.name));
+  }
+
+  /** The bot is not a human and must never keep the server awake. */
+  private isSelf(name: string): boolean {
+    return name.toLowerCase() === this.facade.username.toLowerCase();
   }
 
   /** Called when the bot disconnects for any reason. */

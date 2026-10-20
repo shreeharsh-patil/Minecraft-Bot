@@ -18,11 +18,11 @@ export class GroqProvider extends OpenAiCompatibleProvider {
   constructor(options: GroqProviderOptions = {}) {
     super({
       name: 'groq',
-      model: GROQ_DEFAULT_MODEL,
-      baseUrl: GROQ_BASE_URL,
-      apiKey: '',
-      tier: 'fast',
       ...options,
+      model: options.model ?? GROQ_DEFAULT_MODEL,
+      baseUrl: options.baseUrl ?? GROQ_BASE_URL,
+      apiKey: options.apiKey ?? '',
+      tier: options.tier ?? 'fast',
     });
   }
 }

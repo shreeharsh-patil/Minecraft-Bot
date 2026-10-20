@@ -11,6 +11,13 @@ import { safeChatReply } from '../safety/chatInjectionGuard.js';
 import { COMMAND_SYNTAX } from './commandParser.js';
 import type { Logger } from '../utils/logger.js';
 
+/**
+ * A Minecraft username is at most 16 characters (`[A-Za-z0-9_]{1,16}`), so a
+ * longer "name" is not a name - it is junk that would eat the length budget
+ * of the reply it prefixes.
+ */
+const MAX_NAME_LENGTH = 16;
+
 /** One outbound chat line, waiting for its turn in the send queue. */
 interface QueuedLine {
   /** The exact line that goes into Minecraft chat. */
@@ -48,7 +55,7 @@ export class ChatResponder {
    * Serialised so rapid replies never exceed the server rate limit.
    */
   async send(target: string, message: string): Promise<void> {
-    const line = this.buildLine(target ? `${target}, ` : '', message);
+    const line = this.buildLine(this.namePrefix(target), message);
     if (line === null) return;
     await this.enqueue(line);
   }
@@ -58,6 +65,20 @@ export class ChatResponder {
     const line = this.buildLine('', message);
     if (line === null) return;
     await this.enqueue(line);
+  }
+
+  /**
+   * The `"Name, "` prefix of a reply.
+   *
+   * The name goes through the same redaction gate as the message: it is a
+   * string that reaches Minecraft chat, and a control character in it would
+   * split the line into two (the newline the server never sees as one
+   * message) while the length budget is charged for a single line.
+   */
+  private namePrefix(target: string): string {
+    if (!target) return '';
+    const name = safeChatReply(target, MAX_NAME_LENGTH);
+    return name === '' ? '' : `${name}, `;
   }
 
   /**
@@ -80,14 +101,29 @@ export class ChatResponder {
   private enqueue(text: string): Promise<void> {
     return new Promise<void>((resolve) => {
       this.queue.push({ text, resolve });
-      // The drain never rejects, but the promise is caught anyway: a floating
-      // rejection would take the whole process down.
+      // The drain must never reject, but the promise is caught anyway: a
+      // floating rejection would take the whole process down.
       void this.drain().catch((error: unknown) => {
-        this.logger.error('chat drain failed', {
-          error: error instanceof Error ? error.message : String(error),
-        });
+        this.reportFailure('chat drain failed', error);
       });
     });
+  }
+
+  /**
+   * Reports a failure without ever throwing.
+   *
+   * The log sink is the last thing that may go wrong, and it must not take
+   * the send queue with it: a logger that throws would otherwise abort the
+   * drain and leave every waiting sender on a promise that never settles.
+   */
+  private reportFailure(message: string, error: unknown): void {
+    try {
+      this.logger.error(message, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } catch {
+      // Nothing left to do: the failure is already being handled.
+    }
   }
 
   private async drain(): Promise<void> {
@@ -109,9 +145,7 @@ export class ChatResponder {
           this.lastSentAt = Date.now();
         } catch (error) {
           // A failed send must never strand the sender or kill the process.
-          this.logger.error('chat emit failed', {
-            error: error instanceof Error ? error.message : String(error),
-          });
+          this.reportFailure('chat emit failed', error);
         } finally {
           if (this.inFlight === next) this.inFlight = null;
           next.resolve();
@@ -119,7 +153,18 @@ export class ChatResponder {
       }
     } finally {
       this.sending = false;
+      // A drain that gives up early must not leave the senders that are
+      // still queued on a promise that will never settle: they are released
+      // like `clear()` releases them.
+      this.releaseQueued();
     }
+  }
+
+  /** Releases every sender that is still waiting in the queue. */
+  private releaseQueued(): void {
+    const pending = [...this.queue];
+    this.queue = [];
+    for (const item of pending) item.resolve();
   }
 
   /** Overridden by the bot to actually put the line in Minecraft chat. */
@@ -152,19 +197,31 @@ export class ChatResponder {
  */
 export function formatHelp(prefix: string, maxLength = 190): string[] {
   const lines: string[] = [];
-  let current = 'Commands:';
+  const header = 'Commands: ';
+  let current = '';
   for (const command of COMMAND_SYNTAX) {
     const entry = `${prefix}${command.usage}`;
-    const isFirst = current === 'Commands:';
-    const candidate = isFirst ? `${current} ${entry}` : `${current}, ${entry}`;
-    if (!isFirst && candidate.length > maxLength) {
-      lines.push(`${current}.`);
-      current = `Commands: ${entry}`;
+    // Every line ends with a '.', so the dot has to fit into the budget too.
+    const candidate = current === '' ? `${header}${entry}` : `${current}, ${entry}`;
+    if (candidate.length + 1 <= maxLength) {
+      current = candidate;
       continue;
     }
-    current = candidate;
+    if (current !== '') {
+      lines.push(`${current}.`);
+      current = '';
+    }
+    // The command gets a line of its own. When it does not fit under the
+    // header the header goes: a command that is never shown is worse than a
+    // line without the header. A command that is too long even on its own is
+    // truncated - never dropped, so the help stays complete.
+    const own = `${header}${entry}`;
+    current =
+      own.length + 1 <= maxLength
+        ? own
+        : entry.slice(0, Math.max(0, maxLength - 1)).trimEnd();
   }
-  lines.push(`${current}.`);
+  if (current !== '') lines.push(`${current}.`);
   return lines;
 }
 

@@ -1,5 +1,5 @@
 import { BLOCK_TOOL, SOFT_BLOCKS } from '../../config/constants.js';
-import type { BlockRef, MinecraftFacade } from '../../types/facade.js';
+import type { BlockRef, InventoryEntry, MinecraftFacade } from '../../types/facade.js';
 import type { ExecutionContext } from '../../types/task.js';
 import { AntiGriefRules } from '../../safety/antiGrief.js';
 import { DEFAULT_MAX_MINE } from '../../safety/actionLimits.js';
@@ -161,6 +161,17 @@ export async function runMining(
   return { mined, target: options.count, cancelled, reason };
 }
 
+/**
+ * How many candidates of one block type the search looks at.
+ *
+ * The window is widened when every block in it turned out to be unusable -
+ * the bot's own constructions, a player's build, a block that could not be
+ * broken. Those blocks stay in the world, so a fixed window of the nearest
+ * blocks runs out while minable blocks are still within reach, and the bot
+ * would report "I ran out of cobblestone" with the cobblestone right there.
+ */
+const CANDIDATE_WINDOWS: readonly number[] = [16, 64, 256];
+
 /** Nearest untried block matching any candidate name. */
 function pickNextBlock(
   facade: MinecraftFacade,
@@ -168,9 +179,24 @@ function pickNextBlock(
   searchDistance: number,
   tried: ReadonlySet<string>,
 ): BlockRef | null {
+  for (const limit of CANDIDATE_WINDOWS) {
+    const best = nearestCandidate(facade, names, searchDistance, tried, limit);
+    if (best !== null) return best;
+  }
+  return null;
+}
+
+/** Nearest untried block matching any candidate name, inside one window. */
+function nearestCandidate(
+  facade: MinecraftFacade,
+  names: readonly string[],
+  searchDistance: number,
+  tried: ReadonlySet<string>,
+  limit: number,
+): BlockRef | null {
   let best: BlockRef | null = null;
   for (const name of names) {
-    for (const candidate of facade.findBlocks(name, searchDistance, 16)) {
+    for (const candidate of facade.findBlocks(name, searchDistance, limit)) {
       if (tried.has(posKey(candidate.position))) continue;
       if (isDangerousBlock(candidate.name)) continue;
       // Never mine the bot's own construction: "build a wall" followed by
@@ -205,8 +231,15 @@ export function resolveResourceNames(resource: string): string[] {
   const last = words[words.length - 1];
 
   // "oak logs" -> oak_log, "birch wood" -> birch_log
-  if ((last === 'logs' || last === 'log') && words.length > 1) {
+  if (words.length > 1 && (last === 'logs' || last === 'log')) {
     return [`${words.slice(0, -1).join('_')}_log`];
+  }
+  // "birch wood" is the other word people use for a log. Only a known
+  // species is mapped, so "bamboo wood" does not become the non-existent
+  // "bamboo_log".
+  if (words.length > 1 && (last === 'wood' || last === 'woods')) {
+    const species = words.slice(0, -1).join('_');
+    if (ALL_LOG_TYPES.includes(`${species}_log`)) return [`${species}_log`];
   }
 
   switch (cleaned) {
@@ -262,15 +295,89 @@ export function humaniseBlockName(name: string): string {
 }
 
 /**
+ * Tool tiers, best first: a wooden pickaxe mines nothing that needs iron.
+ */
+const TOOL_TIERS: readonly string[] = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden'];
+
+/** The tool noun of a family: "axe", "pickaxe", "diamond_pickaxe" -> "pickaxe". */
+function toolNoun(family: string): string {
+  const words = family.split('_');
+  return words[words.length - 1] ?? family;
+}
+
+/** How good a tool is: 0 is the best (netherite), -1 is not a tiered tool. */
+function toolTier(item: string): number {
+  const words = item.split('_');
+  return TOOL_TIERS.indexOf(words[0] ?? '');
+}
+
+/**
+ * Does this item serve the tool family a block needs?
+ *
+ * "iron_pickaxe" is a pickaxe but NOT an axe: a plain substring match would
+ * call a pickaxe an axe and the bot would chop logs with it. A family that
+ * names a tier ("diamond_pickaxe") asks for at least that tier, so a
+ * netherite pickaxe still counts.
+ */
+function servesToolFamily(item: string, family: string): boolean {
+  const noun = toolNoun(family);
+  if (item !== noun && !item.endsWith(`_${noun}`)) return false;
+  const required = TOOL_TIERS.indexOf(family.split('_')[0] ?? '');
+  if (required < 0) return true;
+  const tier = toolTier(item);
+  return tier >= 0 && tier <= required;
+}
+
+/**
+ * The best tool of the families the block needs that the bot owns, or null
+ * when it owns none. The families are tried in order - `BLOCK_TOOL` lists
+ * them best first.
+ */
+function bestToolInInventory(
+  facade: MinecraftFacade,
+  families: readonly string[],
+): string | null {
+  let entries: InventoryEntry[] = [];
+  try {
+    entries = facade.getInventory();
+  } catch {
+    // A facade that cannot list the inventory leaves the bot with whatever
+    // it is already holding.
+    return null;
+  }
+  for (const family of families) {
+    let best: string | null = null;
+    let bestTier = Number.POSITIVE_INFINITY;
+    for (const entry of entries) {
+      if (!servesToolFamily(entry.item, family)) continue;
+      const tier = toolTier(entry.item);
+      if (tier < bestTier) {
+        best = entry.item;
+        bestTier = tier;
+      }
+    }
+    if (best !== null) return best;
+  }
+  return null;
+}
+
+/**
  * Picks the right tool for a block via `selectToolFor` and equips it.
+ *
+ * The facade only offers the tool the bot is already holding, and that tool
+ * may be the wrong one for this block (a shovel for stone, a pickaxe for a
+ * log). The tool the block needs is therefore looked up in the inventory as
+ * well, so the bot digs with a tool that actually drops the block.
  * `value: null` means bare hands were judged sufficient.
  */
 async function equipToolFor(facade: MinecraftFacade, ctx: ExecutionContext, target: BlockRef): Promise<ToolOutcome> {
+  const families = BLOCK_TOOL[target.name] ?? [];
   const selected = await guardedOp(() => facade.selectToolFor(target.name), ctx, `Selecting a tool for ${target.name}`);
   if (selected.status === 'cancelled') return { status: 'cancelled' };
   if (selected.status === 'error') return { status: 'error', reason: selected.reason };
 
-  const tool = selected.value;
+  const inInventory = families.length > 0 ? bestToolInInventory(facade, families) : null;
+  const tool = pickTool(selected.value, inInventory, families);
   if (tool === null) return { status: 'ok', value: null };
 
   const equipped = await guardedOp(() => facade.equipItem(tool), ctx, `Equipping ${tool}`);
@@ -280,4 +387,21 @@ async function equipToolFor(facade: MinecraftFacade, ctx: ExecutionContext, targ
     return { status: 'error', reason: `I don't have a ${tool} to mine ${target.name} with.` };
   }
   return { status: 'ok', value: tool };
+}
+
+/**
+ * The tool to dig with. A tool in the inventory is one the bot certainly
+ * owns, so it wins whenever it serves the block; the tool the facade offered
+ * is used only when the inventory holds nothing that serves it.
+ */
+function pickTool(
+  offered: string | null,
+  inInventory: string | null,
+  families: readonly string[],
+): string | null {
+  if (inInventory !== null) return inInventory;
+  if (offered !== null && (families.length === 0 || families.some((f) => servesToolFamily(offered, f)))) {
+    return offered;
+  }
+  return null;
 }

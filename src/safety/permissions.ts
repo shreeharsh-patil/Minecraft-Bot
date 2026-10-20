@@ -34,7 +34,16 @@ export class AuthorizationService {
   private readonly hits = new Map<string, number[]>();
 
   constructor(config: AppConfig) {
-    this.allowed = new Set(config.authorizedPlayers);
+    // The allowlist is normalised here rather than trusted: the config
+    // loader lower-cases the names it parses, but the AppConfig type does
+    // not promise that, and an allowlist that is not lower-cased authorises
+    // nobody at all. An empty name is dropped for the same reason - it would
+    // authorise an empty username.
+    this.allowed = new Set(
+      [...config.authorizedPlayers]
+        .map((name) => name.trim().toLowerCase())
+        .filter((name) => name.length > 0),
+    );
     this.windowMs = config.chat.rateLimit.windowMs;
     this.maxCommands = config.chat.rateLimit.maxCommands;
   }

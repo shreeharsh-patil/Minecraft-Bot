@@ -70,6 +70,8 @@ interface Entry {
   stats: MutableStats;
   /** True while a half-open circuit probe is in flight. */
   probeInFlight: boolean;
+  /** When the in-flight half-open probe was handed out (null when none). */
+  probeAt: number | null;
   /** Last health verdict, or null when the provider was never probed. */
   health: HealthVerdict | null;
   /** The background health probe currently running, if any. */
@@ -162,6 +164,7 @@ export class ProviderPool {
       tier,
       stats: freshStats(provider.name, tier, provider.isAvailable()),
       probeInFlight: false,
+      probeAt: null,
       health: null,
       healthProbe: null,
     };
@@ -206,7 +209,7 @@ export class ProviderPool {
       this.refreshCircuit(entry, now);
       if (entry.stats.circuit.state === 'open') continue;
       // A half-open circuit allows exactly ONE probe, not one per request.
-      if (entry.stats.circuit.state === 'half_open' && entry.probeInFlight) continue;
+      if (entry.stats.circuit.state === 'half_open' && this.probeOutstanding(entry, now)) continue;
       all.push(entry.provider);
       if (tier === undefined || entry.tier === tier) tierMatches.push(entry.provider);
     }
@@ -219,15 +222,18 @@ export class ProviderPool {
         tier,
         candidates: all.length,
       });
+      // Mark the half-open probes we are actually handing out.
       for (const entry of this.entries.values()) {
-        if (entry.stats.circuit.state === 'half_open') entry.probeInFlight = true;
+        if (entry.stats.circuit.state === 'half_open' && all.includes(entry.provider)) {
+          this.markProbe(entry, now);
+        }
       }
       return all;
     }
     // Mark the half-open probes we are actually handing out.
     for (const entry of this.entries.values()) {
       if (entry.stats.circuit.state === 'half_open' && all.includes(entry.provider)) {
-        entry.probeInFlight = true;
+        this.markProbe(entry, now);
       }
     }
     return all;
@@ -349,6 +355,8 @@ export class ProviderPool {
       this.logger.info('circuit closed', { provider: name, previous: stats.circuit.state });
     }
     stats.circuit = { state: 'closed', openedAt: null, until: null };
+    // The half-open probe concluded: its slot is free again.
+    this.releaseProbe(entry);
   }
 
   /** Records a failure and opens the circuit once the threshold is reached. */
@@ -375,6 +383,8 @@ export class ProviderPool {
         kind,
       });
     }
+    // The half-open probe concluded (with a failure): its slot is free again.
+    this.releaseProbe(entry);
   }
 
 /** Rolling view of every provider's health. Copies, not live references. */
@@ -398,7 +408,12 @@ export class ProviderPool {
   public async disposeAll(): Promise<void> {
     const providers = [...this.entries.values()].map((entry) => entry.provider);
     // `dispose()` may return void or a promise; normalise before aggregating.
-    const results = await Promise.allSettled(providers.map((provider) => Promise.resolve(provider.dispose())));
+    // The call is deferred into a microtask so a provider that throws
+    // *synchronously* becomes a rejected result instead of aborting the whole
+    // disposal (the other providers would never be released).
+    const results = await Promise.allSettled(
+      providers.map((provider) => Promise.resolve().then(() => provider.dispose())),
+    );
     for (const result of results) {
       if (result.status === 'rejected') {
         this.logger.warn('provider dispose failed', {
@@ -419,8 +434,38 @@ export class ProviderPool {
     if (circuit.state !== 'open') return;
     if (circuit.until !== null && now >= circuit.until) {
       entry.stats.circuit = { state: 'half_open', openedAt: circuit.openedAt, until: null };
+      // A fresh half-open window: the single probe slot is free again. A
+      // reservation left over from the previous window must not keep the
+      // provider out of the rotation forever.
+      this.releaseProbe(entry);
       this.logger.info('circuit half-open, probing', { provider: entry.provider.name });
     }
+  }
+
+  /**
+   * True while the single half-open probe slot of a provider is taken.
+   *
+   * The slot is released when the probe concludes (success or failure) and
+   * when the circuit is re-armed. A probe whose outcome was never recorded -
+   * the caller aborted the request - must not strand the provider, so the
+   * reservation also expires after one cooldown.
+   */
+  private probeOutstanding(entry: Entry, now: number): boolean {
+    if (!entry.probeInFlight) return false;
+    if (entry.probeAt !== null && now - entry.probeAt >= this.cooldownMs) return false;
+    return true;
+  }
+
+  /** Reserves the single half-open probe slot of a provider. */
+  private markProbe(entry: Entry, now: number): void {
+    entry.probeInFlight = true;
+    entry.probeAt = now;
+  }
+
+  /** Frees the half-open probe slot of a provider. */
+  private releaseProbe(entry: Entry): void {
+    entry.probeInFlight = false;
+    entry.probeAt = null;
   }
 
   private ema(previous: number, sample: number): number {

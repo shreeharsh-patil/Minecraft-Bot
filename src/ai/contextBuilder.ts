@@ -60,6 +60,19 @@ export const DEFAULT_CONTEXT_LIMITS: ContextLimits = {
   scanRadius: 16,
 };
 
+/**
+ * Clamps a limit to a usable, non-negative integer.
+ *
+ * The limits are the whole point of this module, so a nonsense value must
+ * never make the payload BIGGER: `slice(0, -1)` keeps everything but the
+ * last item, `slice(-0)` is `slice(0)` and returns the whole array, and
+ * `Infinity` means "no limit at all". A limit of 0 has to mean "none".
+ */
+function limitOf(value: number | undefined, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.floor(value));
+}
+
 /** What the planner hands to the model. Serialisable and small by construction. */
 export interface CompactContext {
   position: Vec3Like;
@@ -127,7 +140,19 @@ export function buildCompactContext(
   memory?: ContextMemorySource,
   options: ContextBuilderOptions = {},
 ): CompactContext {
-  const limits = { ...DEFAULT_CONTEXT_LIMITS, ...options.limits };
+  // Every limit is clamped: a negative or non-finite limit would otherwise
+  // make the slices below KEEP MORE than was asked for.
+  const limits: ContextLimits = {
+    maxPlayers: limitOf(options.limits?.maxPlayers, DEFAULT_CONTEXT_LIMITS.maxPlayers),
+    maxHostiles: limitOf(options.limits?.maxHostiles, DEFAULT_CONTEXT_LIMITS.maxHostiles),
+    maxBlocks: limitOf(options.limits?.maxBlocks, DEFAULT_CONTEXT_LIMITS.maxBlocks),
+    maxInventoryItems: limitOf(options.limits?.maxInventoryItems, DEFAULT_CONTEXT_LIMITS.maxInventoryItems),
+    maxConversationTurns: limitOf(
+      options.limits?.maxConversationTurns,
+      DEFAULT_CONTEXT_LIMITS.maxConversationTurns,
+    ),
+    scanRadius: limitOf(options.limits?.scanRadius, DEFAULT_CONTEXT_LIMITS.scanRadius),
+  };
   const logger = options.logger ?? silentLogger;
 
   // Every injected function is defensive: a throwing facade must not take the
@@ -174,16 +199,32 @@ export function buildCompactContext(
     }));
 
   const rankedBlocks = rankBlocks(blocks, limits);
-  const conversation = memory?.conversation ?? [];
 
-return {
+  // The rolling session state is injected too, so it gets the same
+  // treatment: a malformed chat window must not take the request down.
+  const conversation = safe<ReadonlyArray<{ player: string; text: string; at: number }>>(
+    'conversation',
+    [],
+    () => memory?.conversation ?? [],
+  );
+  const targetPlayer = safe<string | null>('targetPlayer', null, () => memory?.targetPlayer ?? null);
+  // A limit of 0 means "no chat at all": `slice(-0)` is `slice(0)` and
+  // would return the WHOLE window.
+  const recentChat = safe<Array<{ player: string; text: string }>>('recentChat', [], () =>
+    (limits.maxConversationTurns > 0 ? conversation.slice(-limits.maxConversationTurns) : []).map((turn) => ({
+      player: turn.player,
+      text: turn.text.slice(0, MAX_CHAT_CHARS),
+    })),
+  );
+
+  return {
     position,
     dimension,
     timeOfDay,
     health,
     hunger,
     task,
-    targetPlayer: memory?.targetPlayer ?? null,
+    targetPlayer,
     nearbyPlayers: [...players]
       .sort((a, b) => a.distance - b.distance)
       .slice(0, limits.maxPlayers)
@@ -205,8 +246,6 @@ return {
         .slice(0, limits.maxInventoryItems)
         .map((entry) => ({ name: entry.item, count: entry.count })),
     },
-    recentChat: conversation
-      .slice(-limits.maxConversationTurns)
-      .map((turn) => ({ player: turn.player, text: turn.text.slice(0, MAX_CHAT_CHARS) })),
+    recentChat,
   };
 }

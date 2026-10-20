@@ -8,7 +8,14 @@ import type { ItemParams, Skill, SkillResult } from '../../types/skill.js';
 import type { ActionType } from '../../types/actions.js';
 import { CONFLICT_GROUP } from '../../types/task.js';
 import type { ExecutionContext } from '../../types/task.js';
-import { describeError, failedResult, guardedOp, isCancellation, normaliseBlockName } from '../internal/helpers.js';
+import {
+  cancelledResult,
+  describeError,
+  failedResult,
+  guardedOp,
+  isCancellation,
+  normaliseBlockName,
+} from '../internal/helpers.js';
 import { transferIntoChest } from './chestManager.js';
 
 export class DropItemSkill implements Skill<ItemParams> {
@@ -39,13 +46,25 @@ export class DropItemSkill implements Skill<ItemParams> {
     try {
       if (params.where === 'chest') {
         const result = await transferIntoChest(this.facade, ctx, { item, count });
-        if (!result.ok) return failedResult(result.detail, result.count);
-        return { ok: true, detail: `Put ${result.count} ${pretty} in the chest.`, count: result.count };
+        // The helper knows exactly how much moved and how much is left: a
+        // chest that fills up half way through must not be passed off as a
+        // complete drop.
+        if (!result.ok) return failedResult(result.detail, result.count, count);
+        const detail =
+          result.count < count
+            ? `Put ${result.count} of ${count} ${pretty} in the chest.`
+            : `Put ${result.count} ${pretty} in the chest.`;
+        return {
+          ok: true,
+          detail,
+          count: result.count,
+          ...(result.count < count ? { remaining: count - result.count } : {}),
+        };
       }
 
       const dropped = await guardedOp(() => this.facade.dropItem(item, count), ctx, `Dropping ${count} ${item}`);
       if (dropped.status === 'cancelled') {
-        return { ok: false, detail: `Stopped before dropping ${pretty}.`, count: 0 };
+        return cancelledResult(`Stopped before dropping ${pretty}.`, 0, count);
       }
       if (dropped.status === 'error') {
         return failedResult(dropped.reason, 0, count);
@@ -57,10 +76,15 @@ export class DropItemSkill implements Skill<ItemParams> {
         dropped.value < count
           ? `Dropped ${dropped.value} of ${count} ${pretty}.`
           : `Dropped ${dropped.value} ${pretty}.`;
-      return { ok: dropped.value > 0, detail, count: dropped.value };
+      return {
+        ok: dropped.value > 0,
+        detail,
+        count: dropped.value,
+        ...(dropped.value < count ? { remaining: count - dropped.value } : {}),
+      };
     } catch (error) {
       if (isCancellation(error)) {
-        return { ok: false, detail: `Stopped before dropping ${pretty}.`, count: 0 };
+        return cancelledResult(`Stopped before dropping ${pretty}.`, 0, count);
       }
       return failedResult(`Dropping ${pretty} failed: ${describeError(error)}`, 0, count);
     }

@@ -5,6 +5,7 @@
  * never reach an LLM; they are matched here and dispatched directly.
  */
 import type { BotAction } from '../types/actions.js';
+import { MAX_DROP_COUNT } from '../safety/actionLimits.js';
 
 export interface ParsedCommand {
   name: string;
@@ -83,6 +84,23 @@ function parseName(value: string | undefined): string | null {
 function isItem(value: string | undefined): value is string {
   return value !== undefined && ITEM_RE.test(value.toLowerCase());
 }
+
+/**
+ * The world border - the same limit the validator and the executor enforce on
+ * a position. A coordinate beyond it can never be reached, so the parser
+ * refuses it instead of building an action that is guaranteed to be rejected
+ * further down the line.
+ */
+const WORLD_BORDER_XZ = 30_000_000;
+const WORLD_BORDER_Y = 20_000_000;
+
+/**
+ * The longest follow distance the validator accepts, in blocks. A bigger one
+ * is silently rewritten downstream, which would hide the fact that the
+ * request was out of range.
+ */
+const MAX_FOLLOW_DISTANCE = 64;
+
 /**
  * Converts a deterministic command into the same validated action shape the
  * AI produces, so both paths funnel through one executor.
@@ -102,6 +120,16 @@ export function toAction(name: string, args: string[]): BotAction | { error: str
       if (x === undefined || y === undefined || z === undefined) {
         return { error: 'usage: !goto <x> <y> <z>' };
       }
+      // Absurd coordinates fail closed here: the validator and the executor
+      // both refuse a position outside the world border, so the parser must
+      // not hand them an action that is guaranteed to be rejected later.
+      if (
+        Math.abs(x) > WORLD_BORDER_XZ ||
+        Math.abs(z) > WORLD_BORDER_XZ ||
+        Math.abs(y) > WORLD_BORDER_Y
+      ) {
+        return { error: 'coordinates are outside the world border' };
+      }
       return { type: 'move_to_position', position: { x, y, z } };
     }
 
@@ -109,6 +137,15 @@ export function toAction(name: string, args: string[]): BotAction | { error: str
       const player = parsePlayerName(args[0]);
       if (!player) return { error: 'usage: !follow <player>' };
       const distance = args[1] !== undefined ? parseInteger(args[1]) : null;
+      // The distance is the one numeric argument that is not range checked:
+      // a typo would be dropped in silence and an absurd value would be
+      // silently rewritten downstream, hiding that the request was nonsense.
+      if (args[1] !== undefined && distance === null) {
+        return { error: 'usage: !follow <player> [distance]' };
+      }
+      if (distance !== null && distance > MAX_FOLLOW_DISTANCE) {
+        return { error: `distance must be at most ${MAX_FOLLOW_DISTANCE} blocks` };
+      }
       return {
         type: 'follow_player',
         player,
@@ -142,8 +179,13 @@ export function toAction(name: string, args: string[]): BotAction | { error: str
 
     case 'drop': {
       if (!isItem(args[0])) return { error: 'usage: !drop <item> [count]' };
-      const count = args[1] !== undefined ? parseCount(args[1], 2304) : null;
-      if (args[1] !== undefined && count === null) return { error: 'count must be a positive integer' };
+      // The shared drop ceiling (one stack): the validator and the executor
+      // both refuse a bigger count, so the parser refuses it as a usage
+      // error instead of building an action that can never run.
+      const count = args[1] !== undefined ? parseCount(args[1], MAX_DROP_COUNT) : null;
+      if (args[1] !== undefined && count === null) {
+        return { error: `count must be a positive integer (at most ${MAX_DROP_COUNT})` };
+      }
       return {
         type: 'drop_item',
         item: args[0].toLowerCase(),

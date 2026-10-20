@@ -7,8 +7,9 @@
  * time if one is missing, which fails fast in tests rather than at 3am in game.
  *
  * Two notes on the frozen facade contract:
- *  - `EntitySummary` has no entity id, so the combat skills read an optional
- *    numeric `id` when present and otherwise swing (look + use);
+ *  - `EntitySummary` carries no guaranteed entity id, so the combat skills
+ *    read an optional numeric `id` when present and otherwise swing
+ *    (look + use);
  *  - there is no named-location lookup, so `deposit/withdraw` with a `location`
  *    and `collect_resource` with a `from` refuse the request and say why
  *    instead of quietly using a different place.
@@ -42,6 +43,31 @@ import { createGotoPositionSkill } from './movement/gotoPosition.js';
 import { createAutoEatSkill } from './survival/autoEat.js';
 import { createDefendSkill } from './survival/defend.js';
 
+/**
+ * Builds the ActionType -> Skill map and fails fast on a broken registry.
+ *
+ * Two things are a programming error and must surface at construction time,
+ * not as the wrong action at 3am in game:
+ *  - an action type with no skill at all;
+ *  - two skills claiming the same action type, where the second one would
+ *    silently shadow the first.
+ */
+export function buildSkillRegistry(skills: readonly Skill<never>[]): SkillRegistry {
+  const registry = new Map<ActionType, Skill<never>>();
+  for (const skill of skills) {
+    if (registry.has(skill.name)) {
+      throw new Error(`Two skills are registered for action type "${skill.name}".`);
+    }
+    registry.set(skill.name, skill);
+  }
+
+  const missing = ACTION_TYPES.filter((type) => !registry.has(type));
+  if (missing.length > 0) {
+    throw new Error(`No skill registered for action type(s): ${missing.join(', ')}`);
+  }
+  return registry;
+}
+
 /** Builds the full registry for a facade. Fails fast on a missing skill. */
 export function createSkillRegistry(
   facade: MinecraftFacade,
@@ -69,16 +95,7 @@ export function createSkillRegistry(
     createSaySkill(facade),
   ] as Array<Skill<never>>;
 
-  const registry = new Map<ActionType, Skill<never>>();
-  for (const skill of skills) {
-    registry.set(skill.name, skill);
-  }
-
-  const missing = ACTION_TYPES.filter((type) => !registry.has(type));
-  if (missing.length > 0) {
-    throw new Error(`No skill registered for action type(s): ${missing.join(', ')}`);
-  }
-  return registry;
+  return buildSkillRegistry(skills);
 }
 
 /** Looks up a skill, or undefined when the action type has no skill. */

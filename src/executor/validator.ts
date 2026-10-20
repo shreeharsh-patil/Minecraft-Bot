@@ -13,14 +13,17 @@
 import { isActionType, type ActionType, type BotAction } from '../types/actions.js';
 import type { Vec3Like } from '../types/world.js';
 import {
+  DEFAULT_MAX_BUILD,
   DEFAULT_MAX_MINE,
   DEFAULT_MAX_WAIT_MS,
+  MAX_BUILD_DIMENSION,
   MAX_DEFEND_DURATION_MS,
   MAX_DROP_COUNT,
   MAX_FOLLOW_DURATION_MS,
   MAX_PLANNED_ACTIONS,
 } from '../safety/actionLimits.js';
 import { detectInjectedIntent } from '../safety/chatInjectionGuard.js';
+import { MAX_LOOK_MS } from '../skills/basic/lookAt.js';
 
 export interface ValidationResult {
   valid: boolean;
@@ -49,6 +52,23 @@ function isFiniteNumber(value: unknown): value is number {
 function isVec3(value: unknown): value is Vec3Like {
   return (
     isRecord(value) && isFiniteNumber(value.x) && isFiniteNumber(value.y) && isFiniteNumber(value.z)
+  );
+}
+
+/**
+ * The world border.
+ *
+ * The executor refuses a position outside it, so the validator refuses the
+ * same coordinates: a plan that validates must be a plan that can run.
+ */
+const WORLD_BORDER_XZ = 30_000_000;
+const WORLD_BORDER_Y = 20_000_000;
+
+function isInsideWorld(position: Vec3Like): boolean {
+  return (
+    Math.abs(position.x) <= WORLD_BORDER_XZ &&
+    Math.abs(position.y) <= WORLD_BORDER_Y &&
+    Math.abs(position.z) <= WORLD_BORDER_XZ
   );
 }
 
@@ -100,6 +120,20 @@ function normaliseLocation(value: unknown): string | undefined {
   const normalised = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
   return normalised.length > 0 ? normalised : undefined;
 }
+
+/**
+ * Dimension keys become properties of a plain object, so they have to be
+ * plain identifiers: `__proto__` would be swallowed by the prototype setter
+ * and the requested size would silently vanish.
+ */
+const DIMENSION_KEY_PATTERN = /^[a-z][a-z_]{0,15}$/;
+
+/** Keys that must never become a property of a plain object. */
+const UNSAFE_OBJECT_KEYS: ReadonlySet<string> = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+]);
 
 /** Optional bounded note text. Control characters are stripped by key, not by regex. */
 function sanitizeNote(value: unknown): string | undefined {
@@ -156,9 +190,18 @@ function boundedNonNegativeInt(value: unknown, max: number): number | undefined 
   return Math.floor(value);
 }
 
-function optionalDistance(value: unknown, max = 64): number | undefined {
+/**
+ * An optional distance (or duration), clamped into [0, max].
+ *
+ * `undefined` - the field was not requested at all.
+ * `null` - the field WAS requested but is not a usable number. The caller
+ *   must then refuse the action: silently dropping it would turn "stay 5
+ *   blocks away" into "no limit at all" and a negative distance into "walk
+ *   right up to them". This is the same rule the durations above follow.
+ */
+function optionalDistance(value: unknown, max = 64): number | null | undefined {
   if (value === undefined) return undefined;
-  if (!isFiniteNumber(value) || value < 0) return undefined;
+  if (!isFiniteNumber(value) || value < 0) return null;
   return Math.min(value, max);
 }
 
@@ -180,7 +223,12 @@ export function validateAction(raw: unknown): ValidationResult {
     return { valid: false, reason: `action type "${String(type)}" is not in the allowlist` };
   }
 
-  const note = sanitizeNote(raw['note']);
+  // A note is documentation, not an instruction. One that carries an
+  // injection marker is dropped rather than carried into the action: it must
+  // never be surfaced, not even later, by something that trusts it.
+  const rawNote = sanitizeNote(raw['note']);
+  const note =
+    rawNote !== undefined && detectInjectedIntent(rawNote) !== null ? undefined : rawNote;
 
   switch (type) {
     case 'move_to_player':
@@ -191,6 +239,9 @@ export function validateAction(raw: unknown): ValidationResult {
         return { valid: false, reason: `${type} requires a valid "player" name` };
       }
       const maxDistance = optionalDistance(raw['maxDistance'] ?? raw['distance'] ?? raw['radius']);
+      if (maxDistance === null) {
+        return { valid: false, reason: `${type} distance must be a non-negative number of blocks` };
+      }
       if (type === 'move_to_player') {
         return {
           valid: true,
@@ -241,11 +292,14 @@ export function validateAction(raw: unknown): ValidationResult {
       if (!isVec3(position)) {
         return { valid: false, reason: `${type} requires a numeric "position"` };
       }
-      if (Math.abs(position.x) > 30_000_000 || Math.abs(position.z) > 30_000_000) {
+      if (!isInsideWorld(position)) {
         return { valid: false, reason: 'position is outside the world border' };
       }
       if (type === 'move_to_position') {
         const maxDistance = optionalDistance(raw['maxDistance']);
+        if (maxDistance === null) {
+          return { valid: false, reason: 'move_to_position "maxDistance" must be a non-negative number of blocks' };
+        }
         return {
           valid: true,
           action: { ...base(type, note), position, ...(maxDistance !== undefined ? { maxDistance } : {}) },
@@ -340,6 +394,9 @@ case 'deposit_items':
         return { valid: false, reason: 'attack_hostile "target" must be a valid name' };
       }
       const radius = optionalDistance(raw['radius'], 32);
+      if (radius === null) {
+        return { valid: false, reason: 'attack_hostile "radius" must be a non-negative number of blocks' };
+      }
       return {
         valid: true,
         action: {
@@ -359,15 +416,32 @@ case 'deposit_items':
       if (!isVec3(position)) {
         return { valid: false, reason: 'build_structure requires a "position"' };
       }
+      if (!isInsideWorld(position)) {
+        return { valid: false, reason: 'position is outside the world border' };
+      }
       const dims = raw['dimensions'];
       if (!isRecord(dims)) return { valid: false, reason: 'build_structure requires "dimensions"' };
       const clean: Record<string, number> = {};
+      // The executor prices a structure by the PRODUCT of its sides, so the
+      // validator prices it the same way: a plan that validates must be a
+      // plan the executor will not refuse for being too big.
+      let volume = 1;
       for (const [k, v] of Object.entries(dims)) {
-        if (!/^[a-z_]{1,16}$/.test(k)) return { valid: false, reason: `invalid dimension key "${k}"` };
+        if (!DIMENSION_KEY_PATTERN.test(k) || UNSAFE_OBJECT_KEYS.has(k)) {
+          return { valid: false, reason: `invalid dimension key "${k}"` };
+        }
         if (!isFiniteNumber(v) || v <= 0) {
           return { valid: false, reason: 'dimensions must be positive numbers' };
         }
-        clean[k] = Math.min(Math.floor(v), 32);
+        const side = Math.min(Math.floor(v), MAX_BUILD_DIMENSION);
+        clean[k] = side;
+        volume *= side;
+      }
+      if (volume > DEFAULT_MAX_BUILD) {
+        return {
+          valid: false,
+          reason: `structure volume ${volume} exceeds the build limit ${DEFAULT_MAX_BUILD}`,
+        };
       }
       const material = raw['material'] === undefined ? undefined : normaliseItemName(raw['material']);
       if (raw['material'] !== undefined && material === undefined) {
@@ -417,6 +491,9 @@ case 'deposit_items':
         return { valid: false, reason: 'pickup_items "count" must be a positive integer' };
       }
       const radius = optionalDistance(raw['radius'], 32);
+      if (radius === null) {
+        return { valid: false, reason: 'pickup_items "radius" must be a non-negative number of blocks' };
+      }
       return {
         valid: true,
         action: {
@@ -442,7 +519,10 @@ case 'deposit_items':
     case 'look_at': {
       const position = raw['position'];
       if (!isVec3(position)) return { valid: false, reason: 'look_at requires a numeric "position"' };
-      const durationMs = optionalDistance(raw['durationMs'], 60_000);
+      const durationMs = optionalDistance(raw['durationMs'], MAX_LOOK_MS);
+      if (durationMs === null) {
+        return { valid: false, reason: 'look_at "durationMs" must be a non-negative number of milliseconds' };
+      }
       return {
         valid: true,
         action: { ...base(type, note), position, ...(durationMs !== undefined ? { durationMs } : {}) },

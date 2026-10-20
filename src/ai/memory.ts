@@ -28,6 +28,14 @@ import type { Logger } from '../utils/logger.js';
 /** Rolling chat window shown to the model. */
 export const MAX_CONVERSATION_TURNS = 12;
 
+/**
+ * Hard ceiling on the durable maps.
+ *
+ * `!remember <name>` is chat-reachable, so without a cap a player could
+ * grow the memory file - and every rewrite of it - without bound.
+ */
+const MAX_PERSISTENT_ENTRIES = 128;
+
 export interface MemoryStoreOptions {
   /** Path to the durable JSON file. Omit for a pure in-memory store. */
   file?: string;
@@ -43,12 +51,25 @@ function trim<T>(items: T[], max: number): T[] {
   return items.length > max ? items.slice(items.length - max) : items;
 }
 
+/**
+ * A map that cannot be reached through the prototype chain.
+ *
+ * The keys are player-supplied ("constructor", "__proto__"), and a plain
+ * object resolves them against Object.prototype: the location called
+ * "constructor" was stored under the display name "Object", and
+ * "__proto__" replaced the prototype of the map instead of being a key in
+ * it - so it was never listed and never written to the file.
+ */
+function emptyMap<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
 function emptyPersistent(): PersistentMemory {
   return {
     trustedPlayers: [],
-    namedLocations: {},
-    preferences: {},
-    usefulCoordinates: {},
+    namedLocations: emptyMap<NamedLocation>(),
+    preferences: emptyMap<PlayerPreference>(),
+    usefulCoordinates: emptyMap<Vec3Like>(),
   };
 }
 
@@ -146,6 +167,31 @@ export class InMemoryMemoryStore implements MemoryStore {
       ],
       MAX_RECENT_LOCATIONS,
     );
+    this.pruneLocations(key);
+  }
+
+  /**
+   * Drops the oldest locations once the durable map is full.
+   *
+   * The location that was just remembered is never dropped, and neither is
+   * one the bot touched during this session: "home" must not disappear
+   * because somebody spammed a hundred other names.
+   */
+  private pruneLocations(keepKey: string): void {
+    const locations = this.persistent.namedLocations;
+    const keys = Object.keys(locations);
+    if (keys.length <= MAX_PERSISTENT_ENTRIES) return;
+    const recent = new Set(this.session.recentLocations.map((entry) => entry.name.toLowerCase()));
+    const oldestFirst = keys
+      .filter((key) => key !== keepKey && !recent.has(key))
+      .sort((a, b) => (locations[a]?.createdAt ?? 0) - (locations[b]?.createdAt ?? 0));
+    const excess = keys.length - MAX_PERSISTENT_ENTRIES;
+    for (const key of oldestFirst.slice(0, excess)) {
+      delete locations[key];
+    }
+    this.logger.warn('too many remembered locations, the oldest were dropped', {
+      limit: MAX_PERSISTENT_ENTRIES,
+    });
   }
 
   public recallLocation(name: string): NamedLocation | undefined {
@@ -162,6 +208,24 @@ export class InMemoryMemoryStore implements MemoryStore {
     const normalized = key.toLowerCase();
     const preference: PlayerPreference = { key: normalized, value, updatedAt: this.now() };
     this.persistent.preferences[normalized] = preference;
+    this.prunePreferences(normalized);
+  }
+
+  /** Drops the oldest preferences once the durable map is full. */
+  private prunePreferences(keepKey: string): void {
+    const preferences = this.persistent.preferences;
+    const keys = Object.keys(preferences);
+    if (keys.length <= MAX_PERSISTENT_ENTRIES) return;
+    const oldestFirst = keys
+      .filter((key) => key !== keepKey)
+      .sort((a, b) => (preferences[a]?.updatedAt ?? 0) - (preferences[b]?.updatedAt ?? 0));
+    const excess = keys.length - MAX_PERSISTENT_ENTRIES;
+    for (const key of oldestFirst.slice(0, excess)) {
+      delete preferences[key];
+    }
+    this.logger.warn('too many preferences, the oldest were dropped', {
+      limit: MAX_PERSISTENT_ENTRIES,
+    });
   }
 
   public getPreference(key: string): string | undefined {
@@ -178,6 +242,14 @@ export class InMemoryMemoryStore implements MemoryStore {
   public addTrusted(player: string): void {
     const key = player.toLowerCase();
     if (this.isTrusted(key)) return;
+    if (this.persistent.trustedPlayers.length >= MAX_PERSISTENT_ENTRIES) {
+      // Fail closed: a trusted player is never dropped to make room for a
+      // new one - that would silently take a player's permissions away.
+      this.logger.warn('trusted player limit reached, player not added', {
+        limit: MAX_PERSISTENT_ENTRIES,
+      });
+      return;
+    }
     this.persistent.trustedPlayers = [...this.persistent.trustedPlayers, key];
   }
 
@@ -298,8 +370,8 @@ function readStringArray(value: unknown): string[] {
 }
 
 function readLocations(value: unknown): Record<string, NamedLocation> {
-  if (!isRecord(value)) return {};
-  const out: Record<string, NamedLocation> = {};
+  if (!isRecord(value)) return emptyMap<NamedLocation>();
+  const out = emptyMap<NamedLocation>();
   for (const [key, entry] of Object.entries(value)) {
     if (!isRecord(entry)) continue;
     const position = entry['position'];
@@ -321,8 +393,8 @@ function readLocations(value: unknown): Record<string, NamedLocation> {
 }
 
 function readPreferences(value: unknown): Record<string, PlayerPreference> {
-  if (!isRecord(value)) return {};
-  const out: Record<string, PlayerPreference> = {};
+  if (!isRecord(value)) return emptyMap<PlayerPreference>();
+  const out = emptyMap<PlayerPreference>();
   for (const [key, entry] of Object.entries(value)) {
     if (!isRecord(entry)) continue;
     const prefValue = entry['value'];
@@ -334,8 +406,8 @@ function readPreferences(value: unknown): Record<string, PlayerPreference> {
 }
 
 function readCoordinates(value: unknown): Record<string, Vec3Like> {
-  if (!isRecord(value)) return {};
-  const out: Record<string, Vec3Like> = {};
+  if (!isRecord(value)) return emptyMap<Vec3Like>();
+  const out = emptyMap<Vec3Like>();
   for (const [key, entry] of Object.entries(value)) {
     if (!isRecord(entry)) continue;
     const x = entry['x'];

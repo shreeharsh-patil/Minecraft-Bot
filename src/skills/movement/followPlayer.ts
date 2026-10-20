@@ -117,6 +117,11 @@ export class FollowPlayerSkill implements Skill<FollowPlayerParams> {
           if (!escaped.ok) {
             log.warn('escape reflex failed', { player, detail: escaped.detail });
           }
+          // The escape moved the bot, so the route to the player is void.
+          // Keeping the old goal would suppress every later replan (the
+          // player has not moved, so the goal still looks current) and the
+          // bot would stand where it escaped to instead of following again.
+          goal = null;
           await sleep(this.tickMs, ctx.signal);
           continue;
         }
@@ -149,6 +154,7 @@ export class FollowPlayerSkill implements Skill<FollowPlayerParams> {
           const outcome = await navigateToPosition(this.facade, ctx, backOffTarget(here, sighting.position, stopDistance), {
             description: `Stepping back from ${player}`,
             arriveDistance: 0.5,
+            timeoutMs: navigationBudget(deadline),
           });
           if (outcome.status === 'cancelled') break;
           reportProgress(ctx, ticks, null, `stepping back from ${player}`);
@@ -166,6 +172,7 @@ export class FollowPlayerSkill implements Skill<FollowPlayerParams> {
             const outcome = await navigateToPlayer(this.facade, ctx, player, {
               description: `Following ${player}`,
               arriveDistance: stopDistance,
+              timeoutMs: navigationBudget(deadline),
             });
 
             if (outcome.status === 'cancelled') break;
@@ -195,6 +202,17 @@ export class FollowPlayerSkill implements Skill<FollowPlayerParams> {
       this.facade.stopMoving();
     }
   }
+}
+
+/**
+ * The pathing budget for one navigation of a follow.
+ *
+ * A pathing attempt is capped at `MOVEMENT.PATH_TIMEOUT_MS` - and at
+ * whatever is left of the follow, so a follow never keeps the movement
+ * conflict group long after the follow itself was over.
+ */
+function navigationBudget(deadline: number): number {
+  return Math.max(1, Math.min(MOVEMENT.PATH_TIMEOUT_MS, deadline - Date.now()));
 }
 
 /**

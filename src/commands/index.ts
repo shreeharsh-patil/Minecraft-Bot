@@ -15,6 +15,26 @@ import { parseLocationName } from '../chat/commandParser.js';
 import { distance3 } from '../types/world.js';
 import type { Logger } from '../utils/logger.js';
 
+/**
+ * Ceiling on the number of named locations the bot keeps.
+ *
+ * The persistent store never forgets a location, so without a cap the memory
+ * file grows with every `!remember` and every save rewrites the lot. 128 is
+ * the same per-collection limit the native runtime uses.
+ */
+const MAX_NAMED_LOCATIONS = 128;
+
+/**
+ * Location names that must never reach the store.
+ *
+ * The store keeps locations in a plain object, and `__proto__` is an accessor
+ * on Object.prototype: writing to it replaces the prototype of the record
+ * instead of adding an entry. The location would then be an inherited value
+ * - invisible to a listing and dropped on the next save, while the bot had
+ * already told the player it was remembered.
+ */
+const RESERVED_LOCATION_NAMES: ReadonlySet<string> = new Set(['__proto__']);
+
 export interface LocalCommandDeps {
   facade: MinecraftFacade;
   tasks: TaskManager;
@@ -61,6 +81,21 @@ export class LocalCommands {
           await responder.send(owner, 'Usage: remember <name>, e.g. remember home');
           return;
         }
+        if (RESERVED_LOCATION_NAMES.has(label)) {
+          await responder.send(owner, `"${label}" is not a usable location name.`);
+          return;
+        }
+        // The persistent store keeps every location forever, so a NEW name is
+        // only accepted while there is room for it. Re-using a name moves the
+        // place that is already known and never grows the store.
+        const known = this.deps.memory.recallLocation(label);
+        if (!known && this.deps.memory.listLocations().length >= MAX_NAMED_LOCATIONS) {
+          await responder.send(
+            owner,
+            `I already know ${MAX_NAMED_LOCATIONS} places, which is the maximum. Re-use a name to move one of them.`,
+          );
+          return;
+        }
         const position = this.deps.facade.getPosition();
         this.deps.memory.rememberLocation(label, position);
         await this.deps.memory.persist().catch(() => undefined);
@@ -75,7 +110,19 @@ export class LocalCommands {
         // Navigate to a remembered location.
         const location = this.deps.memory.recallLocation('home');
         if (!location) {
-          await responder.send(owner, 'I have not been told a home yet. Say "remember this place as home".');
+          await responder.send(
+            owner,
+            `I have not been told a home yet. Say "${this.deps.prefix}remember home" first.`,
+          );
+          return;
+        }
+        // An unresolved location is not a confirmed place: its position is a
+        // placeholder, so walking there would send the bot to the wrong spot.
+        if (location.resolved === false) {
+          await responder.send(
+            owner,
+            `My home is not confirmed yet. Say "${this.deps.prefix}remember home" to set it here.`,
+          );
           return;
         }
         await responder.send(owner, `Heading to home (${Math.round(location.position.x)}, ${Math.round(location.position.y)}, ${Math.round(location.position.z)}).`);
@@ -107,8 +154,8 @@ export class LocalCommands {
         position: facade.getPosition(),
         activeTasks: tasks.list(),
         brain: this.deps.providerStats(),
-        // The rate-limit budget left for this player, so a player who is
-        // being throttled can see why their commands stopped working.
+        // The rate-limit budget left for this player, so they can see how
+        // many commands are left before the bot starts ignoring them.
         remainingCommands: auth.remainingQuota(owner),
       }),
     );

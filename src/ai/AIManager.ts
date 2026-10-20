@@ -115,11 +115,23 @@ export class AIManager {
   constructor(options: AIManagerOptions) {
     const { config } = options;
     this.logger = options.logger ?? silentLogger;
-    this.maxConcurrent = Math.max(1, config.maxConcurrentRequests);
-    this.requestTimeoutMs = Math.max(500, config.requestTimeoutMs);
+    // `Math.max(1, NaN)` is NaN and `Math.max(1, Infinity)` is Infinity: a
+    // non-finite config would either queue every request forever (NaN makes
+    // `inFlight < maxConcurrent` false for every value) or silently drop the
+    // concurrency limit altogether (Infinity). Fall back to a safe value.
+    this.maxConcurrent = Number.isFinite(config.maxConcurrentRequests)
+      ? Math.max(1, Math.floor(config.maxConcurrentRequests))
+      : 1;
+    this.requestTimeoutMs = Number.isFinite(config.requestTimeoutMs)
+      ? Math.max(500, Math.floor(config.requestTimeoutMs))
+      : 500;
 
     this.router = new AIRouter({
-      requestTimeoutMs: config.requestTimeoutMs,
+      // A non-finite deadline must never reach a timer: `setTimeout(fn, NaN)`
+      // fires after 1ms and poisons every deadline comparison downstream.
+      requestTimeoutMs: Number.isFinite(config.requestTimeoutMs)
+        ? config.requestTimeoutMs
+        : this.requestTimeoutMs,
       failureThreshold: config.circuitFailureThreshold,
       cooldownMs: config.circuitCooldownMs,
       ...(config.planningModel !== undefined ? { planningModel: config.planningModel } : {}),
@@ -177,13 +189,17 @@ export class AIManager {
   public async planDetailed(request: PlanRequest): Promise<PlanResult> {
     if (this.disposed) throw new Error('AIManager has been disposed');
 
-    const release = await this.acquire(request.signal);
+    // Link the caller's signal with the manager-wide one (`!stop`) BEFORE the
+    // first await. `cancelAll()` REPLACES the manager-wide controller, so a
+    // request that linked afterwards would attach to the fresh, unaborted
+    // generation and run to completion even though `!stop` had already
+    // counted it as cancelled.
+    const linked = this.linkSignals(request.signal);
     try {
-      // Link the caller's signal with the manager-wide one (`!stop`).
-      const signal = this.linkSignals(request.signal);
-      const started = Date.now();
+      const release = await this.acquire(request.signal);
       try {
-        const result = await this.planOrDegrade(request, signal.signal);
+        const started = Date.now();
+        const result = await this.planOrDegrade(request, linked.signal);
         this.planned += 1;
         this.logger.debug('plan complete', {
           requester: request.requester,
@@ -194,10 +210,10 @@ export class AIManager {
         });
         return result;
       } finally {
-        signal.dispose();
+        release();
       }
     } finally {
-      release();
+      linked.dispose();
     }
   }
 
@@ -250,6 +266,9 @@ export class AIManager {
     const cancelled = queued.length + this.inFlight;
     for (const entry of queued) {
       clearTimeout(entry.timer);
+      // A queued request never reached a provider: count it as rejected, the
+      // same way the queue timeout and the abort-while-queued paths do.
+      this.rejected += 1;
       entry.reject(new Error(reason));
     }
     this.logger.info('in-flight AI requests cancelled', { reason, inFlight: this.inFlight, cancelled });

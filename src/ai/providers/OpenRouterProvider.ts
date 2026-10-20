@@ -18,17 +18,21 @@ export interface OpenRouterProviderOptions extends Partial<OpenAiCompatibleOptio
 
 export class OpenRouterProvider extends OpenAiCompatibleProvider {
   constructor(options: OpenRouterProviderOptions = {}) {
-    const { referer, title, ...rest } = options;
+    const { referer, title, extraHeaders, ...rest } = options;
     super({
       name: 'openrouter',
-      model: OPENROUTER_DEFAULT_MODEL,
-      baseUrl: OPENROUTER_BASE_URL,
-      apiKey: '',
-      ...(referer !== undefined ? { extraHeaders: { 'HTTP-Referer': referer } } : {}),
-      ...(title !== undefined
-        ? { extraHeaders: { ...(referer !== undefined ? { 'HTTP-Referer': referer } : {}), 'X-Title': title } }
-        : {}),
       ...rest,
+      model: rest.model ?? OPENROUTER_DEFAULT_MODEL,
+      baseUrl: rest.baseUrl ?? OPENROUTER_BASE_URL,
+      apiKey: rest.apiKey ?? '',
+      // OpenRouter identifies the caller through HTTP-Referer / X-Title.
+      // Caller-supplied headers are merged in, never substituted for them -
+      // otherwise the `referer` / `title` options would be silently dropped.
+      extraHeaders: {
+        ...(referer !== undefined ? { 'HTTP-Referer': referer } : {}),
+        ...(title !== undefined ? { 'X-Title': title } : {}),
+        ...extraHeaders,
+      },
     });
   }
 }

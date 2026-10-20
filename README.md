@@ -19,7 +19,7 @@ executed. The bot is explicitly **not** an AFK/keep-alive tool — see
   but their text is never treated as an instruction.
 - Multi-provider AI with automatic fallback: Groq, Gemini, OpenAI and OpenRouter, each
   with its own key, model, latency tracking and circuit breaker.
-- Closed action allowlist: the model can only emit one of 17 typed action shapes.
+- Closed action allowlist: the model can only emit one of 19 typed action shapes.
   Everything else is dropped before execution.
 - Multi-step planning: one request produces a sequence of validated actions that the
   executor runs as a cancellable task.
@@ -37,8 +37,16 @@ executed. The bot is explicitly **not** an AFK/keep-alive tool — see
 
 ## Requirements
 
-- **Node.js >= 20.11** (`engines` in `package.json`). Node 22 LTS is what the
-  `Dockerfile` targets.
+- **Node.js >= 22.** The runtime dependencies decide this, not this file: `mineflayer`
+  and `minecraft-protocol` both declare `engines.node: ">=22"`, and mineflayer
+  refuses to start on older releases. The `engines` field in `package.json` still
+  says `>= 20.11` - that is out of step with the dependencies and should be
+  raised to `>=22`. Render is pinned to Node 22 through `NODE_VERSION` in
+  `render.yaml`, and CI uses Node 22.
+- **The `Dockerfile` builds the Rust companion, not this bot.** It is a
+  multi-stage Debian build of the native `minecraft-companion` executable in
+  `native/`; the TypeScript bot is deployed as a Node service through
+  `render.yaml`.
 - A reachable **Minecraft Java Edition** server. `.env.example` ships an Aternos host as
   the example, but any Java Edition server the bot's account can join will work.
 - **No AI provider API keys are required.** With `AI_LOCAL_PLANNER=true` (the default)
@@ -64,8 +72,10 @@ cp .env.example .env            # Linux/macOS
 Copy-Item .env.example .env     # PowerShell
 ```
 
-Then edit `.env`: set `MC_HOST`, `MC_PORT`, `MC_USERNAME`, `AUTHORIZED_PLAYERS` and at
-least one provider API key. `.env` is gitignored (`.gitignore` lists `.env` and
+Then edit `.env`: set `MC_HOST`, `MC_PORT`, `MC_USERNAME` and `AUTHORIZED_PLAYERS`.
+A provider API key is **optional**: with `AI_LOCAL_PLANNER=true` (the default) the
+built-in planner answers without any key, and a key is only needed for the LLM
+planner. `.env` is gitignored (`.gitignore` lists `.env` and
 `.env.*`, with an explicit `!.env.example` exception), so it will never be committed.
 
 **No API keys are hardcoded anywhere in this repository.** Every provider key, model

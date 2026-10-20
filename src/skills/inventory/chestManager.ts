@@ -55,6 +55,21 @@ export interface TransferResult {
   remaining?: number;
 }
 
+/**
+ * Turns a transfer result into a skill result.
+ *
+ * The remainder is carried over unchanged: `failedResult` derives it from a
+ * total, but the transfer helpers already know exactly how much is left.
+ */
+function toSkillResult(result: TransferResult): SkillResult {
+  return {
+    ok: result.ok,
+    detail: result.detail,
+    count: result.count,
+    ...(result.remaining !== undefined ? { remaining: result.remaining } : {}),
+  };
+}
+
 type LocateOutcome =
   | { chest: ChestRef }
   | { error: string }
@@ -131,7 +146,13 @@ export async function transferIntoChest(
   if (available <= 0) {
     return { ok: false, detail: `I don't have any ${item.replace(/_/g, ' ')} to store.`, count: 0 };
   }
-  const count = Math.min(request.count, available);
+  // Whole items only, and at least one: a fractional or empty count would
+  // reach the facade as a nonsense transfer.
+  const requested = Math.floor(request.count);
+  if (!Number.isFinite(requested) || requested <= 0) {
+    return { ok: false, detail: 'I need a count of at least 1 to store.', count: 0 };
+  }
+  const count = Math.min(requested, available);
 
   const found = locateChest(facade, request.location);
   if ('error' in found) return { ok: false, detail: found.error, count: 0 };
@@ -174,6 +195,7 @@ export async function transferIntoChest(
         ? `Stored ${moved.value} of ${count} ${item.replace(/_/g, ' ')}.`
         : `Stored ${moved.value} ${item.replace(/_/g, ' ')}.`,
     count: moved.value,
+    ...(moved.value < count ? { remaining: count - moved.value } : {}),
   };
 }
 /** Moves `count` of `item` out of the nearest chest into the bot's inventory. */
@@ -197,9 +219,12 @@ export async function transferOutOfChest(
     return { ok: false, detail: grief.reason ?? 'I cannot open that chest.', count: 0 };
   }
 
-  const reached = await reachChest(facade, ctx, found.chest);
-  if ('error' in reached) return { ok: false, detail: reached.error, count: 0 };
-  if ('cancelled' in reached) return { ok: false, detail: 'Cancelled before taking items.', count: 0 };
+  // Everything below is checked BEFORE the bot walks: a request that cannot
+  // be honoured must not send it to a chest it is not going to use.
+  const wanted = request.item !== undefined ? normaliseBlockName(request.item) : null;
+  if (wanted !== null && wanted.length === 0) {
+    return { ok: false, detail: 'I need to know what to take out.', count: 0 };
+  }
 
   // A full inventory is an ordinary condition, not an error to throw.
   const free = facade.freeSlots();
@@ -207,22 +232,31 @@ export async function transferOutOfChest(
     return { ok: false, detail: "My inventory is full - I can't take anything out.", count: 0 };
   }
 
-  const wanted = request.item !== undefined ? normaliseBlockName(request.item) : null;
-  if (wanted !== null && wanted.length === 0) {
-    return { ok: false, detail: 'I need to know what to take out.', count: 0 };
-  }
-
   // The free slots are a STACK budget, not an item count: one free slot
   // holds a whole stack.
   const stackBudget = free !== null ? free * MAX_STACK_SIZE : MAX_STACK_SIZE;
-  const count = Math.floor(request.count ?? stackBudget);
-  if (!Number.isFinite(count) || count <= 0) {
+  const requested = Math.floor(request.count ?? stackBudget);
+  if (!Number.isFinite(requested) || requested <= 0) {
     return { ok: false, detail: 'I need a count of at least 1.', count: 0 };
   }
+  // Never ask for more than the inventory can hold. Mineflayer moves items
+  // until the destination is full and then throws "destination full", and the
+  // facade reports that as "nothing moved" - so an oversized request would
+  // lose the count of what did move and report a full chest as empty.
+  const count = free !== null ? Math.min(requested, stackBudget) : requested;
+
+  const reached = await reachChest(facade, ctx, found.chest);
+  if ('error' in reached) return { ok: false, detail: reached.error, count: 0 };
+  if ('cancelled' in reached) return { ok: false, detail: 'Cancelled before taking items.', count: 0 };
 
   if (wanted === null) {
     // No item named: grab a useful stack rather than guessing at one item.
-    return takeSomething(facade, ctx, found.chest, count);
+    const grab = await takeSomething(facade, ctx, found.chest, count);
+    // Only an explicit request has a meaningful "still missing" number.
+    if (grab.ok && request.count !== undefined && grab.count < requested) {
+      return { ...grab, remaining: requested - grab.count };
+    }
+    return grab;
   }
 
   const taken = await guardedOp(
@@ -239,7 +273,13 @@ export async function transferOutOfChest(
   if (taken.value <= 0) {
     return { ok: false, detail: `There is no ${wanted.replace(/_/g, ' ')} in that chest.`, count: 0 };
   }
-  return { ok: true, detail: `Took ${taken.value} ${wanted.replace(/_/g, ' ')}.`, count: taken.value };
+  const label = wanted.replace(/_/g, ' ');
+  return {
+    ok: true,
+    detail: taken.value < count ? `Took ${taken.value} of ${count} ${label}.` : `Took ${taken.value} ${label}.`,
+    count: taken.value,
+    ...(taken.value < count ? { remaining: count - taken.value } : {}),
+  };
 }
 
 /**
@@ -311,8 +351,7 @@ export class DepositItemsSkill implements Skill<ChestParams> {
         ...(params.location !== undefined ? { location: params.location } : {}),
         rules: this.rules,
       });
-      if (!result.ok) return failedResult(result.detail, result.count);
-      return { ok: true, detail: result.detail, count: result.count };
+      return toSkillResult(result);
     } catch (error) {
       if (isCancellation(error)) return { ok: false, detail: 'Stopped while storing items.', count: 0 };
       return failedResult(`Storing items failed: ${describeError(error)}`, 0);
@@ -337,8 +376,7 @@ export class WithdrawItemsSkill implements Skill<ChestParams> {
         ...(params.location !== undefined ? { location: params.location } : {}),
         rules: this.rules,
       });
-      if (!result.ok) return failedResult(result.detail, result.count);
-      return { ok: true, detail: result.detail, count: result.count };
+      return toSkillResult(result);
     } catch (error) {
       if (isCancellation(error)) return { ok: false, detail: 'Stopped while taking items.', count: 0 };
       return failedResult(`Taking items failed: ${describeError(error)}`, 0);

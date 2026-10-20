@@ -8,8 +8,11 @@
  *  - the key goes in the query string, so the URL must never be logged as-is;
  *  - `systemInstruction` carries the system prompt, not a `role: system` message;
  *  - `contents[].parts[].text` carries user/assistant turns;
- *  - JSON is requested with `generationConfig.responseMimeType`.
+ *  - JSON is requested with `generationConfig.responseMimeType`;
+ *  - `finishReason: MAX_TOKENS` means the answer was cut short, so it is
+ *    rejected instead of being passed off as a complete plan.
  */
+import { ProviderError } from '../../types/provider.js';
 import type { CompletionRequest } from '../../types/provider.js';
 import { BaseProvider, asRecord, asString, readUsage } from './BaseProvider.js';
 import type { BaseProviderOptions, WireResult } from './BaseProvider.js';
@@ -45,10 +48,10 @@ export class GeminiProvider extends BaseProvider {
   constructor(options: Partial<GeminiProviderOptions> = {}) {
     super({
       name: 'gemini',
-      model: GEMINI_DEFAULT_MODEL,
-      baseUrl: GEMINI_BASE_URL,
-      apiKey: '',
       ...options,
+      model: options.model ?? GEMINI_DEFAULT_MODEL,
+      baseUrl: options.baseUrl ?? GEMINI_BASE_URL,
+      apiKey: options.apiKey ?? '',
     });
   }
 
@@ -101,6 +104,21 @@ export class GeminiProvider extends BaseProvider {
     for (const part of parts) {
       const piece = asString(asRecord(part)?.['text']);
       if (piece !== undefined) text += piece;
+    }
+
+    // `MAX_TOKENS` means the generation hit the per-request token limit, so
+    // the answer is incomplete. Gemini counts the reasoning tokens of a
+    // thinking model against `maxOutputTokens`, which is why a small budget
+    // regularly truncates the JSON in the middle. Handing that half-plan
+    // back as a complete answer would make the planner drop every action
+    // without the router ever trying the next provider.
+    if (asString(first?.['finishReason']) === 'MAX_TOKENS') {
+      throw new ProviderError(
+        this.name,
+        'parse_error',
+        `${this.name}: response was truncated (MAX_TOKENS)`,
+        { retryable: false },
+      );
     }
 
     const usage = readUsage(asRecord(root['usageMetadata']));

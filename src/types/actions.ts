@@ -4,10 +4,14 @@
  * This union is intentionally closed. The model may only emit one of these
  * shapes; the validator in `src/executor/validator.ts` rejects anything else,
  * which is what makes prompt injection from Minecraft chat non-executable.
+ *
+ * "Closed" has to mean closed at RUNTIME too, not just in the type system:
+ * the list is frozen so nothing can push a new action type into the
+ * allowlist behind the validator's back.
  */
 import type { Vec3Like } from './world.js';
 
-export const ACTION_TYPES = [
+export const ACTION_TYPES = Object.freeze([
   'move_to_player',
   'move_to_position',
   'follow_player',
@@ -27,13 +31,22 @@ export const ACTION_TYPES = [
   'look_at',
   'wait',
   'say',
-] as const;
+] as const);
 
 export type ActionType = (typeof ACTION_TYPES)[number];
 
 export interface BaseAction {
   type: ActionType;
-  /** Short model-supplied explanation, surfaced to the requester in chat. */
+  /**
+   * Short model-supplied explanation, carried with the action.
+   *
+   * It is NOT sent to chat: the requester sees the action type and the
+   * skill's own message. The note is sanitised (control characters are
+   * stripped, it is capped at 200 characters) and, when a whole plan is
+   * validated, screened for injected intent - but nothing reads it, so it
+   * is metadata only. Do not start surfacing it in chat without the same
+   * injection screen the `say` message gets.
+   */
   note?: string;
 }
 
@@ -102,7 +115,13 @@ export interface CollectResourceAction extends BaseAction {
   /** Human-readable item name, e.g. "oak logs" or "cobblestone". */
   resource: string;
   count: number;
-  /** Optional: only from one named location, e.g. "home". */
+  /**
+   * Optional: only from one named location, e.g. "nearest".
+   *
+   * The bot only knows the places around it ("nearest", "here", "around",
+   * "current"). Any other name is refused with a reason instead of mining
+   * the nearest ore and claiming it came from there.
+   */
   from?: string;
 }
 
@@ -125,7 +144,13 @@ export interface DepositItemsAction extends BaseAction {
   item?: string;
   /** How many items to store. Omitted means "everything I carry". */
   count?: number;
-  /** Chest location: a named location, "nearest", or omitted for the nearest chest. */
+  /**
+   * Chest location: "nearest", or omitted for the nearest chest.
+   *
+   * The bot has no named-location lookup, so a named location ("home") is
+   * refused with a reason rather than quietly using a different chest -
+   * possibly one that belongs to a player.
+   */
   location?: string;
 }
 
@@ -133,6 +158,12 @@ export interface WithdrawItemsAction extends BaseAction {
   type: 'withdraw_items';
   item?: string;
   count?: number;
+  /**
+   * Chest location: "nearest", or omitted for the nearest chest.
+   *
+   * As with `deposit_items`, a named location ("home") cannot be resolved
+   * and is refused with a reason.
+   */
   location?: string;
 }
 
@@ -184,34 +215,48 @@ export interface DefendPlayerAction extends BaseAction {
   /**
    * How long to guard. Omitted means "the built-in default" - a guard with
    * no deadline would keep the combat conflict group claimed forever.
+   *
+   * The guard also needs the body: it walks back to the player it is
+   * protecting, so it claims the movement group as well.
    */
   durationMs?: number;
+}
+
+/**
+ * Every action shape, keyed by the action type that selects it.
+ *
+ * The union below is derived from this map, so the allowlist and the shapes
+ * cannot drift apart: an action type without a shape is a compile error here
+ * rather than a runtime surprise in the validator, which would reject the
+ * action with "unhandled action type" long after the model asked for it.
+ */
+export interface ActionShapeMap {
+  move_to_player: MoveToPlayerAction;
+  move_to_position: MoveToPositionAction;
+  follow_player: FollowPlayerAction;
+  stop: StopAction;
+  look_at: LookAtAction;
+  wait: WaitAction;
+  say: SayAction;
+  mine_block: MineBlockAction;
+  collect_resource: CollectResourceAction;
+  equip_item: EquipItemAction;
+  drop_item: DropItemAction;
+  deposit_items: DepositItemsAction;
+  withdraw_items: WithdrawItemsAction;
+  pickup_items: PickupItemsAction;
+  place_block: PlaceBlockAction;
+  build_structure: BuildStructureAction;
+  eat: EatAction;
+  attack_hostile: AttackHostileAction;
+  defend_player: DefendPlayerAction;
 }
 
 /**
  * The union of everything executable. Note that `build_structure` is included
  * but gated behind an authorized player + safety check before execution.
  */
-export type BotAction =
-  | MoveToPlayerAction
-  | MoveToPositionAction
-  | FollowPlayerAction
-  | StopAction
-  | LookAtAction
-  | WaitAction
-  | SayAction
-  | MineBlockAction
-  | CollectResourceAction
-  | EquipItemAction
-  | DropItemAction
-  | DepositItemsAction
-  | WithdrawItemsAction
-  | PickupItemsAction
-  | PlaceBlockAction
-  | BuildStructureAction
-  | EatAction
-  | AttackHostileAction
-  | DefendPlayerAction;
+export type BotAction = ActionShapeMap[ActionType];
 
 export function isActionType(value: unknown): value is ActionType {
   return typeof value === 'string' && (ACTION_TYPES as readonly string[]).includes(value);

@@ -47,7 +47,14 @@ export async function startHealthServer(port: number, logger: Logger): Promise<H
     port: bound,
     close: () =>
       new Promise<void>((resolve) => {
+        // `server.close()` only fires its callback once every connection has
+        // drained, and closing the listener also switches off Node's
+        // request-timeout reaper - so a client that keeps a socket open (or
+        // stalls mid-request) would hang this promise forever and keep the
+        // port bound. Force the remaining connections down so the listener is
+        // really released and the shutdown path can finish.
         server.close(() => resolve());
+        server.closeAllConnections();
       }),
   };
 }

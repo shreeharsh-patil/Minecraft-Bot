@@ -40,6 +40,9 @@ export type StructureType = (typeof STRUCTURE_TYPES)[number];
 /** Hard cap on blocks placed by one build task. */
 export const MAX_BUILD_BLOCKS = 256;
 
+/** How many placement failures in a row mean the run is stuck. */
+const MAX_CONSECUTIVE_FAILURES = 8;
+
 /** Per-structure dimension caps. */
 const LIMITS = {
   wall: { length: 24, height: 12 },
@@ -94,7 +97,10 @@ export function planStructure(
   const size = dimension(dimensions, 'size', 5, LIMITS.simple_house.size);
   const height = dimension(dimensions, 'height', 4, LIMITS.simple_house.height);
   const roofY = origin.y + height;
-  const doorX = origin.x + Math.floor(size / 2);
+  // The doorway is the middle cell of the far wall. It is an offset from the
+  // origin, not an absolute coordinate: comparing it with the absolute x
+  // sealed every house that was not built at x = 0.
+  const doorIndex = Math.floor(size / 2);
 
   for (let dx = 0; dx < size; dx += 1) {
     for (let dz = 0; dz < size; dz += 1) push(origin.x + dx, origin.y, origin.z + dz); // floor
@@ -104,7 +110,7 @@ export function planStructure(
       for (let dz = 0; dz < size; dz += 1) {
         const edge = dx === 0 || dz === 0 || dx === size - 1 || dz === size - 1;
         if (!edge) continue;
-        const isDoorway = dx === doorX && dz === size - 1 && dy <= 2;
+        const isDoorway = dx === doorIndex && dz === size - 1 && dy <= 2;
         if (isDoorway) continue;
         push(origin.x + dx, origin.y + dy, origin.z + dz);
       }
@@ -114,6 +120,50 @@ export function planStructure(
     for (let dz = 0; dz < size; dz += 1) push(origin.x + dx, roofY, origin.z + dz); // roof
   }
   return positions;
+}
+
+/**
+ * Shrinks the request until the whole structure fits inside the block cap.
+ *
+ * Cutting the plan short instead would leave a house without a roof, so the
+ * dimensions give way instead and the finished shape stays intact.
+ */
+function planWithinBudget(
+  structure: StructureType,
+  origin: BlockPos,
+  dimensions: Record<string, number>,
+  planned: BlockPos[],
+): BlockPos[] {
+  if (planned.length <= MAX_BUILD_BLOCKS) return planned;
+
+  if (structure === 'wall') {
+    const height = dimension(dimensions, 'height', 3, LIMITS.wall.height);
+    // Give up length first: a wall keeps the height that was asked for.
+    const length = Math.min(
+      dimension(dimensions, 'length', 5, LIMITS.wall.length),
+      Math.max(1, Math.floor(MAX_BUILD_BLOCKS / height)),
+    );
+    return planStructure(structure, origin, { length, height });
+  }
+
+  if (structure === 'platform') {
+    const width = dimension(dimensions, 'width', 4, LIMITS.platform.width);
+    const length = Math.min(
+      dimension(dimensions, 'length', 4, LIMITS.platform.length),
+      Math.max(1, Math.floor(MAX_BUILD_BLOCKS / width)),
+    );
+    return planStructure(structure, origin, { length, width });
+  }
+
+  // simple_house: give up the footprint first, so the house keeps its height.
+  const height = dimension(dimensions, 'height', 4, LIMITS.simple_house.height);
+  const size = dimension(dimensions, 'size', 5, LIMITS.simple_house.size);
+  for (let smaller = size; smaller >= 2; smaller -= 1) {
+    const plan = planStructure(structure, origin, { size: smaller, height });
+    if (plan.length <= MAX_BUILD_BLOCKS) return plan;
+  }
+  // A one cell wide house is always well inside the cap.
+  return planStructure(structure, origin, { size: Math.min(size, 2), height: 2 });
 }
 
 export interface BuildStructureParams {
@@ -160,7 +210,7 @@ export class BuildStructureSkill implements Skill<BuildStructureParams> {
 
     const dimensions = params.dimensions ?? {};
     const planned = planStructure(structure, origin, dimensions);
-    const plan = planned.slice(0, MAX_BUILD_BLOCKS);
+    const plan = planWithinBudget(structure, origin, dimensions, planned);
 
     if (plan.length < planned.length) {
       ctx.say(`Clamping the build to ${MAX_BUILD_BLOCKS} blocks.`);
@@ -206,6 +256,8 @@ export class BuildStructureSkill implements Skill<BuildStructureParams> {
       let existing = 0;
       /** Cells that could not be built in: something else is in the way. */
       let blocked = 0;
+      /** Cells the bot tried to build in, but the placement failed. */
+      let failed = 0;
       /** Consecutive placement failures, so a stuck run gives up. */
       let consecutiveFailures = 0;
       for (const target of plan) {
@@ -263,21 +315,30 @@ export class BuildStructureSkill implements Skill<BuildStructureParams> {
           reportProgress(ctx, placed, plan.length, `Built ${placed}/${plan.length}`);
         } else {
           consecutiveFailures += 1;
-          // Something is in the way we cannot clear; keep going and report.
-          if (consecutiveFailures > plan.length) break;
+          failed += 1;
+          // The cell could not be built in; keep going, but a run that cannot
+          // place anything gives up instead of hammering every cell.
+          if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) break;
         }
       }
 
       const skipped = existing + blocked;
       const summary =
         `${structure.replace('_', ' ')}: placed ${placed} of ${plan.length} ${material}` +
-        (skipped > 0 ? `, skipped ${skipped}` : '');
+        (skipped > 0 ? `, skipped ${skipped}` : '') +
+        (failed > 0 ? `, failed ${failed}` : '');
       if (placed + existing >= plan.length) {
         return { ok: true, detail: `Finished. ${summary}.`, count: placed };
       }
+      // Say what actually went wrong: a cell that was in the way and a cell
+      // the bot could not place are different problems.
+      const reason =
+        failed > 0
+          ? `I could not place ${failed} of the blocks.`
+          : 'Something was already in the way.';
       return {
         ok: false,
-        detail: `${summary}. Something was already in the way.`,
+        detail: `${summary}. ${reason}`,
         count: placed,
         remaining: Math.max(0, plan.length - placed - existing),
       };

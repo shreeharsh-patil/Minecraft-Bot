@@ -93,16 +93,23 @@ describe('DepositItemsSkill', () => {
 
   it('is cancellable mid-transfer', async () => {
     const facade = worldWithChest({ dirt: 10 });
-    facade.moveDelayMs = 50;
     const skill = new DepositItemsSkill(facade);
     const test = createTestContext();
 
-    const running = skill.execute({ item: 'dirt' }, test.ctx);
-    setTimeout(() => test.abort(), 20);
+    // Cancel while the bot is still walking to the chest. The abort is fired
+    // from the navigation call itself, so the test never depends on the wall
+    // clock: a slow machine used to let the transfer finish before the timer
+    // fired, and the test then failed for no reason.
+    const originalMove = facade.moveToPosition.bind(facade);
+    facade.moveToPosition = async (target, options) => {
+      test.abort();
+      return originalMove(target, options);
+    };
 
-    const result = await running;
+    const result = await skill.execute({ item: 'dirt' }, test.ctx);
 
     expect(result.ok).toBe(false);
+    expect(result.detail).toMatch(/cancel/i);
     expect(facade.countItem('dirt')).toBe(10);
     expect(facade.chestContents(CHEST)['dirt']).toBeUndefined();
   });

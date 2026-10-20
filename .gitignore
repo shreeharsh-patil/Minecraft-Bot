@@ -16,6 +16,14 @@ benchmark-results/
 !.env.example
 !.env.native.example
 
+# Minecraft / Microsoft auth token cache (MC_PROFILES_PATH) — NEVER commit these.
+# render.yaml points MC_PROFILES_PATH at src/.minecraft-auth (inside the tracked
+# source tree); the cache holds Microsoft access tokens.
+.minecraft-auth/
+.minecraft/
+launcher_accounts.json
+*-cache.json
+
 # Logs
 logs/
 *.log
@@ -43,3 +51,6 @@ t.txt
 eslint-*.txt
 final-vitest.txt
 vitest-*.json
+
+# Root-level scratch probes (throwaway developer scripts, not part of the build)
+.scratch-*.ts

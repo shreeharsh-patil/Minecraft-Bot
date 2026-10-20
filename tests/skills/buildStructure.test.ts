@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { BuildStructureSkill, planStructure, STRUCTURE_TYPES } from '../../src/skills/building/buildStructure.js';
 import { PlaceBlockSkill } from '../../src/skills/building/placeBlock.js';
 import { EquipItemSkill } from '../../src/skills/inventory/equipItem.js';
+import type { ExecutionContext } from '../../src/types/task.js';
 import { FakeMinecraftFacade } from './fakes/fakeFacade.js';
 import { createTestContext } from './helpers/testContext.js';
 
@@ -79,20 +80,38 @@ describe('BuildStructureSkill', () => {
   });
 
   it('stops building when aborted', async () => {
-    const facade = new FakeMinecraftFacade({ inventory: { cobblestone: 200 } });
+    // Enough material for the whole platform: the old version only carried
+    // 200 of the 256 blocks, so the build refused to start ("I need 256
+    // cobblestone but I only have 200") and the abort was never exercised.
+    const facade = new FakeMinecraftFacade({ inventory: { cobblestone: 300 } });
     const skill = new BuildStructureSkill(facade);
     const test = createTestContext();
 
-    const running = skill.execute(
-      { structure: 'platform', position: ORIGIN, dimensions: { length: 16, width: 16 } },
-      test.ctx,
-    );
-    test.abort();
+    // Abort in the middle of the build, not before it: the progress report
+    // fires once per block that was actually placed, so this cancels the run
+    // after the third block. The old version aborted before the first block
+    // was placed and so never tested a build that stops half way.
+    let placements = 0;
+    const ctx: ExecutionContext = {
+      ...test.ctx,
+      progress: (update) => {
+        test.ctx.progress(update);
+        placements += 1;
+        if (placements === 3) test.abort();
+      },
+    };
 
-    const result = await running;
+    const result = await skill.execute(
+      { structure: 'platform', position: ORIGIN, dimensions: { length: 16, width: 16 } },
+      ctx,
+    );
 
     expect(result.ok).toBe(false);
-    expect(facade.placedPositions.length).toBeLessThan(256);
+    expect(result.count).toBe(3);
+    expect(result.detail).toMatch(/stopped after 3 blocks/i);
+    // The build stopped: the remaining 253 blocks were never placed.
+    expect(facade.placedPositions).toHaveLength(3);
+    expect(facade.placedPositions.length).toBeLessThan(16 * 16);
   });
 
   it('does not overwrite a block that is already in the way', async () => {

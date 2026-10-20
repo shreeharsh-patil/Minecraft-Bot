@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Skill } from '../../src/types/skill.js';
+import { MOVEMENT } from '../../src/config/constants.js';
+import { distance3 } from '../../src/types/world.js';
 import { GotoPlayerSkill } from '../../src/skills/movement/gotoPlayer.js';
 import { GotoPositionSkill } from '../../src/skills/movement/gotoPosition.js';
 import { StopSkill } from '../../src/skills/basic/stop.js';
@@ -71,11 +73,17 @@ describe('GotoPositionSkill', () => {
     const facade = new FakeMinecraftFacade({ position: { x: 0, y: 64, z: 0 } });
     const skill = new GotoPositionSkill(facade);
     const test = createTestContext();
+    const target = { x: 8, y: 64, z: -3 };
 
-    const result = await skill.execute({ position: { x: 8, y: 64, z: -3 } }, test.ctx);
+    const result = await skill.execute({ position: target }, test.ctx);
 
     expect(result.ok).toBe(true);
-    expect(facade.getPosition()).toEqual({ x: 8, y: 64, z: -3 });
+    // The skill must ask for exactly those coordinates...
+    expect(facade.moveToPositionCalls[0]?.target).toEqual(target);
+    // ...and the bot ends up there. The real pathfinder stops `arriveDistance`
+    // short of the target, so the contract is "within reach", not "on the
+    // exact block".
+    expect(distance3(facade.getPosition(), target)).toBeLessThanOrEqual(MOVEMENT.ARRIVE_DISTANCE + 1);
   });
 
   it('rejects invalid coordinates', async () => {

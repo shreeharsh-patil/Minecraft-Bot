@@ -106,7 +106,14 @@ function req(env: Env, key: string, issues: string[]): string {
   return v;
 }
 
-export function int(env: Env, key: string, fallback: number, issues: string[], min = 0): number {
+export function int(
+  env: Env,
+  key: string,
+  fallback: number,
+  issues: string[],
+  min = 0,
+  max = Number.MAX_SAFE_INTEGER,
+): number {
   const v = str(env, key);
   if (v === undefined) return fallback;
   // Strict: "25565abc" used to parse as 25565 and be accepted silently.
@@ -123,8 +130,22 @@ export function int(env: Env, key: string, fallback: number, issues: string[], m
     issues.push(`${key} must be >= ${min} (got ${n})`);
     return fallback;
   }
+  if (n > max) {
+    issues.push(`${key} must be <= ${max} (got ${n})`);
+    return fallback;
+  }
   return n;
 }
+
+/**
+ * Upper bound for every millisecond timeout that ends up in a `setTimeout`.
+ *
+ * Node's timers are 32-bit: a delay above 2^31-1 ms is silently clamped to
+ * 1 ms (with a TimeoutOverflowWarning), which would turn "very patient"
+ * into "instant". Ten minutes is far above any sane setting and far below
+ * the clamp.
+ */
+const MAX_TIMER_MS = 600_000;
 
 export function bool(env: Env, key: string, fallback: boolean, issues: string[]): boolean {
   const v = str(env, key);
@@ -193,15 +214,27 @@ export function buildConfig(env: Env = process.env): AppConfig {
   const minecraft: MinecraftConfig = {
     host: req(env, 'MC_HOST', issues),
     port: int(env, 'MC_PORT', 25565, issues, 1),
-    username: req(env, 'MC_USERNAME', issues),    auth: oneOf(env, 'MC_AUTH', ['microsoft', 'offline'] as const, 'microsoft', issues),
+    username: req(env, 'MC_USERNAME', issues),
+    auth: oneOf(env, 'MC_AUTH', ['microsoft', 'offline'] as const, 'microsoft', issues),
     ...(str(env, 'MC_VERSION') ? { version: str(env, 'MC_VERSION') } : {}),
     ...(str(env, 'MC_PROFILES_PATH') ? { profilesPath: str(env, 'MC_PROFILES_PATH') } : {}),
-    spawnTimeoutMs: int(env, 'MC_SPAWN_TIMEOUT_MS', 60_000, issues, 1_000),
+    spawnTimeoutMs: int(env, 'MC_SPAWN_TIMEOUT_MS', 60_000, issues, 1_000, MAX_TIMER_MS),
   };
 
   if (minecraft.port > 65535) {
     issues.push(`MC_PORT must be a valid port number (got ${minecraft.port})`);
     minecraft.port = 25565;
+  }
+
+  if (minecraft.username && !/^[A-Za-z0-9_]{1,16}$/.test(minecraft.username)) {
+    // The protocol only accepts 1-16 characters of A-Z, 0-9 and _ (the same
+    // rule the command parser applies to player names). Not fatal here - an
+    // offline-mode server may still accept it - but the join is rejected by
+    // most servers, so say so instead of failing with an opaque kick.
+    warnings.push(
+      `MC_USERNAME "${minecraft.username}" is not a valid Minecraft username ` +
+        '(1-16 characters of A-Z, 0-9 and _); the server will most likely reject the join.',
+    );
   }
 
   if (minecraft.auth === 'offline') {
@@ -279,7 +312,7 @@ export function buildConfig(env: Env = process.env): AppConfig {
   const ai: AiConfig = {
     providers,
     localPlanner,
-    requestTimeoutMs: int(env, 'AI_REQUEST_TIMEOUT_MS', 20_000, issues, 500),
+    requestTimeoutMs: int(env, 'AI_REQUEST_TIMEOUT_MS', 20_000, issues, 500, MAX_TIMER_MS),
     ...(planningModel ? { planningModel } : {}),
     circuitFailureThreshold: int(env, 'AI_CIRCUIT_FAILURE_THRESHOLD', 3, issues, 1),
     circuitCooldownMs: int(env, 'AI_CIRCUIT_COOLDOWN_MS', 60_000, issues, 1_000),
@@ -298,8 +331,22 @@ export function buildConfig(env: Env = process.env): AppConfig {
 
   const presence: PresenceConfig = {
     enabled: bool(env, 'DISCONNECT_WITHOUT_HUMANS', true, issues),
-    timeoutSeconds: int(env, 'HUMAN_TIMEOUT_SECONDS', 60, issues, 0),
+    // 0 would disconnect the bot at the very first presence check, so the
+    // switch that turns safe mode off is DISCONNECT_WITHOUT_HUMANS=false -
+    // not a zero-second timeout.
+    timeoutSeconds: int(env, 'HUMAN_TIMEOUT_SECONDS', 60, issues, 1),
   };
+
+  if (!presence.enabled) {
+    // The bot is explicitly not an AFK keep-alive: it must leave an idle
+    // server on its own. Opting out is legitimate (a server that is always
+    // on), but it is exactly the setting that turns the bot into a keep-alive,
+    // so it is announced at startup.
+    warnings.push(
+      'DISCONNECT_WITHOUT_HUMANS=false: the bot will NOT leave an idle server on its ' +
+        'own. Only use this when the server is always on.',
+    );
+  }
 
   const safety: SafetyConfig = {
     maxActionsPerMinute: int(env, 'MAX_ACTIONS_PER_MINUTE', 120, issues, 0),
@@ -307,6 +354,16 @@ export function buildConfig(env: Env = process.env): AppConfig {
     maxBuildBlocksPerTask: int(env, 'MAX_BUILD_BLOCKS_PER_TASK', 256, issues, 1),
     followDistance: int(env, 'FOLLOW_DISTANCE', 3, issues, 1),
   };
+
+  if (safety.maxActionsPerMinute === 0) {
+    // 0 is documented as "no limit", but the rate ceiling is the last guard
+    // against a runaway or hallucinated plan, so switching it off is said
+    // out loud.
+    warnings.push(
+      'MAX_ACTIONS_PER_MINUTE=0: the global action-rate ceiling is disabled, so a ' +
+        'runaway or hallucinated plan is no longer throttled.',
+    );
+  }
 
   // Platform keep-alive: Render (and similar hosts) inject `PORT` and expect
   // an open HTTP port. HEALTH_PORT overrides the injected value explicitly.
@@ -319,8 +376,11 @@ export function buildConfig(env: Env = process.env): AppConfig {
   const healthPortRaw = str(env, 'HEALTH_PORT') ?? platformPort;
   let healthPort: number | undefined;
   if (healthPortRaw !== undefined) {
-    const parsed = Number.parseInt(healthPortRaw, 10);
-    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 65535) {
+    // Strict, like every other number here: `Number.parseInt('8080abc')` is
+    // 8080, so a typo would silently open the wrong port. Only a plain
+    // integer in the TCP range is accepted.
+    const parsed = /^\d+$/.test(healthPortRaw) ? Number.parseInt(healthPortRaw, 10) : Number.NaN;
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
       issues.push(
         `${healthPortRaw === platformPort ? 'PORT/HEALTH_PORT' : 'HEALTH_PORT'} must be a port number between 1 and 65535 (got "${healthPortRaw}")`,
       );

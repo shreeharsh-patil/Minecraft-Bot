@@ -28,7 +28,7 @@ services:
         sync: false
       - key: MC_VERSION
       - key: MC_PROFILES_PATH
-        value: /opt/render/project/src/.minecraft-auth
+        value: /var/data/.minecraft-auth
       - key: AUTHORIZED_PLAYERS
         sync: false
       - key: AI_LOCAL_PLANNER

@@ -26,7 +26,9 @@ export class AutoEatSkill implements Skill<EatParams> {
     if (explicit.length > 0) {
       food = explicit;
     } else {
-      if (hunger.current >= HUNGER_THRESHOLD) {
+      // "At or below" the threshold counts as hungry, so the comparison has
+      // to be strict: at exactly HUNGER_THRESHOLD the bot still eats.
+      if (hunger.current > HUNGER_THRESHOLD) {
         return { ok: true, detail: `I'm not hungry (${Math.round(hunger.current)}/20).`, count: 0 };
       }
       food = this.pickFood();

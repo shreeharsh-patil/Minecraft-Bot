@@ -54,6 +54,31 @@ interface TransportContext {
   timeoutMs: number;
 }
 
+/**
+ * The largest delay `setTimeout` can represent (2^31-1 ms).
+ *
+ * Node silently rewrites anything larger into 1ms, which would abort every
+ * request immediately instead of waiting for it.
+ */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * Clamps a caller-supplied timeout into a range the platform timer honours.
+ *
+ * `Infinity` (and every value the timer cannot hold) means "no deadline" -
+ * the planner uses `Number.MAX_SAFE_INTEGER` for exactly that - and is mapped
+ * onto the timer maximum. Handing it to `setTimeout` unchanged would fire the
+ * abort after 1ms and fail every request as a timeout.
+ *
+ * `NaN` is not a deadline at all but a caller bug: it keeps failing fast
+ * instead of turning into a request that never ends.
+ */
+function toTimerMs(value: number): number {
+  if (value === Infinity) return MAX_TIMER_MS;
+  if (Number.isNaN(value)) return 1;
+  return Math.max(1, Math.min(MAX_TIMER_MS, Math.floor(value)));
+}
+
 /** Network-level failure codes worth naming rather than lumping into `unknown`. */
 const NETWORK_CODES: ReadonlySet<string> = new Set([
   'ECONNREFUSED',
@@ -172,7 +197,7 @@ export abstract class BaseProvider implements AiProvider {
       throw new ProviderError(this.name, 'auth', `${this.name}: no API key configured`, { retryable: false });
     }
 
-    const timeoutMs = Math.max(1, Math.floor(request.timeoutMs));
+    const timeoutMs = toTimerMs(request.timeoutMs);
     const controller = new AbortController();
     const timeoutState = { timedOut: false };
     const timer = setTimeout(() => {
@@ -225,7 +250,18 @@ export abstract class BaseProvider implements AiProvider {
         });
       }
 
-      const wire = this.readResult(decoded);
+      let wire: WireResult;
+      try {
+        wire = this.readResult(decoded);
+      } catch (error) {
+        // An adapter may throw here - an OpenAI-compatible host can answer
+        // 200 with an error envelope. The taxonomy is this layer's contract:
+        // a raw error must never leak above it.
+        if (error instanceof ProviderError) throw error;
+        throw new ProviderError(this.name, 'unknown', `${this.name}: ${scrubText(errorMessage(error))}`, {
+          cause: error,
+        });
+      }
       if (wire.text.trim().length === 0) {
         throw new ProviderError(this.name, 'parse_error', `${this.name}: model returned no text`, {
           retryable: false,

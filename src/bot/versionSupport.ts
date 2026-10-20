@@ -12,6 +12,7 @@
  * names the versions that do work.
  */
 import minecraftData from 'minecraft-data';
+import mineflayer from 'mineflayer';
 
 /** The version this bot is built and tested against. */
 export const TESTED_VERSION = '1.21.1';
@@ -21,7 +22,42 @@ export const TESTED_VERSION = '1.21.1';
  * much older releases (1.0 and even the 12w snapshots), but the client
  * library only supports 1.8.8 and newer.
  */
-const OLDEST_SUPPORTED_VERSION = '1.8.8';
+const OLDEST_SUPPORTED_VERSION = mineflayer.oldestSupportedVersion;
+
+/**
+ * The newest version the client library speaks. The protocol data runs ahead
+ * of the client: a release is announced - and lands in minecraft-data - long
+ * before the client can speak it, so the upper bound comes from the client
+ * library and not from the data.
+ */
+const NEWEST_SUPPORTED_VERSION = mineflayer.latestSupportedVersion;
+
+/**
+ * Protocol numbers are small (775 for the newest release). minecraft-data
+ * marks a release that has no protocol of its own yet with a placeholder
+ * above 2^30, so anything above this bound is a placeholder and not a
+ * protocol number.
+ */
+const MAX_PROTOCOL_NUMBER = 1_000_000;
+
+/** Every release minecraft-data knows, keyed by its version string. */
+const knownVersions = minecraftData.versionsByMinecraftVersion.pc;
+
+/** The protocol numbers the client library speaks. */
+const clientProtocols = new Set(
+  mineflayer.testedVersions
+    .map((version) => knownVersions[version]?.version)
+    .filter((protocol): protocol is number => protocol !== undefined),
+);
+
+/** Release order of the client's oldest supported version. */
+const oldestDataVersion = knownVersions[OLDEST_SUPPORTED_VERSION]?.dataVersion ?? 0;
+
+/** Release order of the client's newest supported version. */
+const newestDataVersion = knownVersions[NEWEST_SUPPORTED_VERSION]?.dataVersion ?? 0;
+
+/** Protocol number of the client's newest supported version (775 for 26.1). */
+const newestProtocol = knownVersions[NEWEST_SUPPORTED_VERSION]?.version;
 
 export interface VersionVerdict {
   /** True when the client library can speak this version. */
@@ -37,19 +73,60 @@ export interface VersionVerdict {
 }
 
 /**
- * Every version the installed protocol data can speak, newest first.
+ * The protocol a release speaks, or undefined when the release has no
+ * protocol of its own.
  *
- * `minecraft-data` lists releases far older than the client library supports,
- * so the list is cut at 1.8.8: asking for 1.6.4 must be refused with a clear
- * message instead of failing later inside the handshake.
+ * A snapshot or pre-release speaks the protocol of the release it belongs to
+ * (1.21.1-rc1 speaks the 1.21 protocol); a release that never got one - the
+ * newest announcements - has none at all.
+ */
+function protocolOf(version: string): number | undefined {
+  let current = version;
+  for (let depth = 0; depth < 8; depth += 1) {
+    const entry = knownVersions[current];
+    if (entry === undefined) return undefined;
+    const protocol = entry.version;
+    if (protocol !== undefined && protocol <= MAX_PROTOCOL_NUMBER) return protocol;
+    const major = entry.majorVersion;
+    // A release that points at itself has no protocol of its own.
+    if (major === undefined || major === current) return undefined;
+    current = major;
+  }
+  return undefined;
+}
+
+/**
+ * True when the client library can speak this release.
+ *
+ * The client refuses releases older than its oldest supported one and
+ * releases newer than its newest one - unless the newer release speaks the
+ * very same protocol (26.1.1 is protocol 775, like 26.1).
+ */
+function canSpeak(version: string): boolean {
+  const entry = knownVersions[version];
+  if (entry === undefined) return false;
+  const protocol = protocolOf(version);
+  if (protocol === undefined) return false;
+  if (!clientProtocols.has(protocol)) return false;
+  const dataVersion = entry.dataVersion ?? 0;
+  if (dataVersion < oldestDataVersion) return false;
+  if (dataVersion > newestDataVersion && protocol !== newestProtocol) return false;
+  return true;
+}
+
+/**
+ * Every version the client library can speak, newest first.
+ *
+ * `minecraft-data` lists releases far older than the client library supports
+ * - and far newer, because a release is announced before the client can speak
+ * it. Asking for 1.6.4 - or for a release that only the announcement mentions
+ * - must be refused with a clear message instead of failing later inside the
+ * handshake.
  */
 export function supportedVersions(): string[] {
-  const all = minecraftData.versions.pc.map((entry) => entry.minecraftVersion);
-  const oldestIndex = all.indexOf(OLDEST_SUPPORTED_VERSION);
-  if (oldestIndex === -1) return all;
-  // The list is newest-first, so everything up to (and including) 1.8.8 is
-  // supported and everything after it is too old.
-  return all.slice(0, oldestIndex + 1);
+  return minecraftData.versions.pc
+    .map((entry) => entry.minecraftVersion)
+    .filter((version) => canSpeak(version));
 }
 
 /**
@@ -61,8 +138,8 @@ export function supportedVersions(): string[] {
  */
 export function checkMinecraftVersion(requested?: string): VersionVerdict {
   const versions = supportedVersions();
-  const newestSupported = versions[0] ?? TESTED_VERSION;
-  const oldestSupported = versions[versions.length - 1] ?? OLDEST_SUPPORTED_VERSION;
+  const newestSupported = NEWEST_SUPPORTED_VERSION;
+  const oldestSupported = OLDEST_SUPPORTED_VERSION;
 
   if (requested === undefined || requested.trim().length === 0) {
     return { supported: true, newestSupported, oldestSupported };

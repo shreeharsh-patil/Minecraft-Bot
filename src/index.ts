@@ -73,8 +73,15 @@ export class BotApp {
    * otherwise be retried forever (a reconnect storm).
    */
   private droppedSessions = 0;
-  /** When the current session connected (null while disconnected). */
+  /**
+   * When the current session connected (null until the first session).
+   *
+   * Kept after a teardown so the next drop can still be measured against
+   * the session it belongs to.
+   */
   private connectedAt: number | null = null;
+  /** Periodic housekeeping timer; released on shutdown. */
+  private housekeeping: NodeJS.Timeout | null = null;
 
   private constructor(config: AppConfig, logger: Logger, health: HealthServerHandle | null = null) {
     this.config = config;
@@ -120,6 +127,13 @@ export class BotApp {
       await this.connect();
       this.logger.info('bot ready');
     } catch (error) {
+      // A shutdown that raced the startup (a SIGTERM during the spawn wait)
+      // is not a connection failure: the app is going down, so it must not
+      // be reported as a fatal error.
+      if (this.stopping) {
+        this.logger.info('startup aborted by shutdown');
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error('initial connection failed', { error: message });
 
@@ -134,6 +148,11 @@ export class BotApp {
       });
 
       if (outcome !== 'connected') {
+        if (outcome === 'aborted' || this.stopping) {
+          // The shutdown won the race while we were backing off.
+          this.logger.info('startup aborted by shutdown');
+          return;
+        }
         throw new Error(`could not connect to ${this.config.minecraft.host} (${outcome})`);
       }
       this.logger.info('bot ready after reconnect');
@@ -146,10 +165,29 @@ export class BotApp {
       config: this.config.minecraft,
       logger: this.logger,
     });
+    // A shutdown may have arrived while we were waiting for the spawn: the
+    // app is going down, so this session must not be installed. Without this
+    // check the bot would stay connected after the shutdown had finished and
+    // its socket would keep the process alive on a host that is already
+    // tearing the service down.
+    if (this.stopping) {
+      this.quitBot(connection, 'shutting down');
+      throw new Error('connection aborted: the app is shutting down');
+    }
     this.connection = connection;
     // Remember when this session started: a session that dies within
     // MIN_SESSION_UPTIME_MS was rejected, not interrupted.
     this.connectedAt = Date.now();
+
+    // The server can drop us between the spawn and the event wiring below.
+    // Nothing listens for 'end' yet (waitForSpawn removes its listeners as
+    // soon as it settles), so such a drop would simply be lost: the connect
+    // would report success and the app would sit there with a dead bot that
+    // never reconnects. Remember it and fail the connect instead.
+    let endedEarly = false;
+    connection.bot.once('end', () => {
+      endedEarly = true;
+    });
 
     const facade = new MineflayerFacade(connection.bot, this.logger);
     const auth = new AuthorizationService(this.config);
@@ -235,7 +273,13 @@ export class BotApp {
         });
       },
       onDisconnect: (reason) => {
-        void this.onDisconnected(reason);
+        // Fire and forget, but never unhandled: a rejected promise would
+        // take the whole process down.
+        void this.onDisconnected(reason).catch((error: unknown) => {
+          this.logger.error('disconnect handler failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       },
     });
 
@@ -248,12 +292,71 @@ export class BotApp {
     presence.setDisconnectHandler((reason) => {
       this.logger.info('leaving: Aternos safe mode active', { reason });
       this.stopEverything('no authorized human online');
-      void this.shutdown('no-authorized-human');
+      // Fire and forget, but never unhandled: a rejected promise would take
+      // the whole process down instead of letting it exit cleanly.
+      void this.shutdown('no-authorized-human').catch((error: unknown) => {
+        this.logger.error('shutdown failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     });
     this.presence = presence;
     presence.start();
 
     await responder.announce('Online. Type !help for commands.');
+
+    if (endedEarly) {
+      // The connection died while the session was being built: fail the
+      // connect so the bounded reconnect loop tries again instead of
+      // reporting a dead bot as ready.
+      await this.abortSession('the server dropped the connection during startup');
+      throw new Error('the server closed the connection while the bot was starting');
+    }
+
+    // Periodic housekeeping: drop settled tasks so memory stays flat.
+    this.startHousekeeping();
+  }
+
+  /**
+   * Starts the periodic housekeeping that drops settled tasks.
+   *
+   * The timer is unref'd - it must never be the reason the process stays
+   * alive - and it is released again when the app shuts down.
+   */
+  private startHousekeeping(): void {
+    if (this.housekeeping !== null) return;
+    this.housekeeping = setInterval(() => {
+      this.tasks?.prune();
+    }, BOT_TIMING.TICK_MS * 60);
+    this.housekeeping.unref();
+  }
+
+  /**
+   * Releases a session that must not survive: its listeners, timers, AI
+   * sockets and the client socket itself.
+   */
+  private async abortSession(reason: string): Promise<void> {
+    const connection = this.connection;
+    const ai = this.teardownSession(reason);
+    this.quitBot(connection, reason);
+    try {
+      await ai?.dispose();
+    } catch (error) {
+      this.logger.debug('ai dispose failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /** Quits a client, ignoring failures of an already dead connection. */
+  private quitBot(connection: ConnectedBot | null, reason: string): void {
+    try {
+      connection?.bot.quit(reason);
+    } catch (error) {
+      this.logger.debug('quit failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /** Runs a deterministic command action with no AI involved. */
@@ -484,37 +587,51 @@ export class BotApp {
   }
 
   private async runShutdown(reason: string): Promise<void> {
-    this.logger.info('shutting down', { reason });
-    // Unwind any pending reconnect sleep/attempt immediately.
-    this.lifecycle.abort();
-
-    const connection = this.connection;
-    const ai = this.teardownSession(reason);
-
-    // dispose() aborts in-flight AI requests, so it must complete.
     try {
-      await ai?.dispose();
-    } catch (error) {
-      this.logger.warn('ai dispose failed', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+      this.logger.info('shutting down', { reason });
+      // Unwind any pending reconnect sleep/attempt immediately.
+      this.lifecycle.abort();
 
-    try {
-      connection?.bot.quit(reason);
-    } catch (error) {
-      this.logger.debug('quit failed', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+      // Release the periodic housekeeping timer.
+      if (this.housekeeping !== null) {
+        clearInterval(this.housekeeping);
+        this.housekeeping = null;
+      }
 
-    // Release the keep-alive port last: the platform may still be probing it.
-    try {
-      await this.health?.close();
+      const connection = this.connection;
+      const ai = this.teardownSession(reason);
+
+      // dispose() aborts in-flight AI requests, so it must complete.
+      try {
+        await ai?.dispose();
+      } catch (error) {
+        this.logger.warn('ai dispose failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      this.quitBot(connection, reason);
+
+      // Release the keep-alive port last: the platform may still be probing it.
+      try {
+        await this.health?.close();
+      } catch (error) {
+        this.logger.debug('health server close failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     } catch (error) {
-      this.logger.debug('health server close failed', {
-        error: error instanceof Error ? error.message : String(error),
-      });
+      // A shutdown must never reject: its callers are fire and forget (the
+      // signal handlers, the presence monitor) and an unhandled rejection
+      // would kill the process instead of letting it exit cleanly.
+      try {
+        this.logger.error('shutdown failed', {
+          reason,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } catch {
+        // Even the log line failed - there is nothing left to report it with.
+      }
     }
   }
 }
@@ -563,12 +680,6 @@ async function main(): Promise<void> {
     await active.shutdown('startup failed').catch(() => undefined);
     return;
   }
-
-  // Periodic housekeeping: drop settled tasks so memory stays flat.
-  const housekeeping = setInterval(() => {
-    active.tasks?.prune();
-  }, BOT_TIMING.TICK_MS * 60);
-  housekeeping.unref();
 }
 
 /**

@@ -146,7 +146,8 @@ export class ActionExecutor {
     signal?: AbortSignal,
   ): Promise<SkillResult & { cancelled: boolean }> {
     // A standalone action is its own task, so the per-task ceilings start
-    // fresh here as well.
+    // fresh here as well - but only while no other task owns them (see
+    // `execute`).
     return this.execute(owner, action, signal, true);
   }
 
@@ -155,6 +156,8 @@ export class ActionExecutor {
    *
    * `resetCounters` is false for the actions of a plan (the plan reset the
    * per-task counters once, at its start) and true for a standalone action.
+   * A standalone action only gets that fresh budget when no plan owns the
+   * counters - see the reset below.
    */
   private async execute(
     owner: string,
@@ -162,6 +165,14 @@ export class ActionExecutor {
     signal: AbortSignal | undefined,
     resetCounters: boolean,
   ): Promise<SkillResult & { cancelled: boolean }> {
+    // A signal that is already aborted means the caller cancelled before we
+    // got here. The 'abort' event has already fired, so the relay below would
+    // never fire again and the action would run anyway - a cancelled action
+    // must never reach the world.
+    if (signal?.aborted) {
+      this.logger.info('action cancelled before it started', { action: action.type });
+      return { ok: false, detail: 'cancelled', cancelled: true };
+    }
     // THE chokepoint: nothing reaches a skill without passing the shared
     // validator, whichever path produced the action - the model, the
     // deterministic command parser or a direct caller.
@@ -197,7 +208,11 @@ export class ActionExecutor {
       return { ok: false, detail: grief.reason, cancelled: false };
     }
 
-    if (resetCounters) this.deps.limits.resetTaskCounters();
+    // The per-task ceilings live in shared state, so only the task that owns
+    // them may zero them. A standalone action that landed while a plan was
+    // running would otherwise hand that plan a second, full budget and let
+    // it mine (or build) past its ceiling.
+    if (resetCounters && this.activePlan === null) this.deps.limits.resetTaskCounters();
     const budget = this.checkBudget(validated);
     if (!budget.allowed) {
       return { ok: false, detail: budget.reason, cancelled: false };
@@ -231,6 +246,22 @@ export class ActionExecutor {
 
     try {
       const result = (await (skill as Skill<BotAction>).execute(validated, ctx));
+      // A cancelled skill reports the cancellation in its RESULT - the skill
+      // layer never throws for it ("ordinary game failures come back as typed
+      // outcomes, never as thrown errors"). So the executor has to notice the
+      // abort itself: otherwise a cancelled action looks like an ordinary
+      // failure, the plan carries on with the next step and the body is left
+      // walking.
+      if (handle.signal.aborted) {
+        // Book what the action actually did before reporting the
+        // cancellation: a cancelled action may still have mined or placed
+        // blocks, and those count against the ceiling.
+        this.recordUsage(validated, result);
+        this.deps.tasks.cancel(handle.record.id, 'aborted');
+        // Always halt the body when a task is cancelled.
+        this.deps.facade.stopMoving();
+        return { ok: false, detail: 'cancelled', cancelled: true };
+      }
       this.deps.tasks.complete(handle.record.id, result.ok ? 'completed' : 'failed', result.detail);
       this.recordUsage(validated, result);
       return { ...result, cancelled: false };

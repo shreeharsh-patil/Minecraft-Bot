@@ -142,14 +142,21 @@ describe('wireBotEvents - chat payloads', () => {
     expect(onChat).toHaveBeenCalledWith('Bob', 'hi there');
   });
 
-  it('ignores system messages that have no sender', () => {
-    const { bot, emit } = fakeBot();
-    const onChat = vi.fn();
-    wireBotEvents({ bot, logger: silentLogger, onChat, onDisconnect: vi.fn() });
+  it('drops a message whose sender cannot be resolved, whatever position it claims', () => {
+    // The sender is the only gate: a payload with no sender component and no
+    // sender argument has nobody behind it, so it is dropped. The position
+    // ("chat"/"system") is not what decides this - the wiring ignores it
+    // entirely (see `void position` in src/bot/events.ts), so a message is
+    // only kept or dropped on the strength of its sender.
+    for (const position of ['chat', 'system']) {
+      const { bot, emit } = fakeBot();
+      const onChat = vi.fn();
+      wireBotEvents({ bot, logger: silentLogger, onChat, onDisconnect: vi.fn() });
 
-    emit('message', chatMessage('Server closed'), 'system', undefined, false);
+      emit('message', chatMessage('Server closed'), position, undefined, false);
 
-    expect(onChat).not.toHaveBeenCalled();
+      expect(onChat, position).not.toHaveBeenCalled();
+    }
   });
 
   it('survives a payload that is neither shape', () => {

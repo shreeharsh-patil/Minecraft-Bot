@@ -1,4 +1,12 @@
-/** `stop`: halt all movement immediately. Also the cleanup path for `!stop`. */
+/**
+ * `stop`: halt all movement immediately.
+ *
+ * This is the in-plan stop - the planner's "stop" action. The `!stop`
+ * command does NOT come through this skill: the chat listener cancels the
+ * tasks, the plan and the AI itself (see `stopEverything` in src/index.ts)
+ * and then calls the facade directly. A skill can only do the one thing a
+ * skill can do: halt the body.
+ */
 import type { MinecraftFacade } from '../../types/facade.js';
 import type { Skill, SkillResult } from '../../types/skill.js';
 import type { ActionType } from '../../types/actions.js';

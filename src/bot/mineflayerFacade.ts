@@ -7,6 +7,11 @@
  */
 import type { Bot as MineflayerBot } from 'mineflayer';
 import type { Entity } from 'prismarine-entity';
+// `goals` is a namespace on a CommonJS module: the named import compiles but
+// does not exist at runtime (Node's CJS named-export detection cannot see it),
+// so the namespace is taken from the default export instead.
+import type { goals as PathfinderGoals } from 'mineflayer-pathfinder';
+import pathfinderPackage from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import type { Vec3Like, BlockPos, EntitySummary, PlayerSummary, TimeOfDay } from '../types/world.js';
 import { distance3 } from '../types/world.js';
@@ -22,6 +27,9 @@ import type {
 import { MOVEMENT, DANGEROUS_BLOCKS, HOSTILE_MOB_FAMILIES } from '../config/constants.js';
 import type { Logger } from '../utils/logger.js';
 import { withTimeout, AbortedError } from '../utils/sleep.js';
+
+/** The pathfinder's goal classes (GoalNear and friends). */
+const goals = pathfinderPackage.goals;
 
 /**
  * Single documented conversion point between our plain Vec3Like and the Vec3
@@ -236,6 +244,26 @@ export class MineflayerFacade implements MinecraftFacade {
     };
   }
 
+  /**
+   * Every player that is ONLINE, according to the server's tab list.
+   *
+   * The tab list is the server's own list of connected players, independent
+   * of distance - the only correct source for "is the owner still here?".
+   * A spatial scan cannot answer that: an owner 200 blocks away in a mine is
+   * online, and the bot must not hang up on them.
+   */
+  getOnlinePlayers(): Array<{ name: string }> {
+    const out: Array<{ name: string }> = [];
+    const self = this.bot.username;
+    for (const player of Object.values(this.bot.players ?? {})) {
+      const name = player?.username;
+      if (typeof name !== 'string' || name.length === 0) continue;
+      if (name === self) continue; // the bot is not a human
+      out.push({ name });
+    }
+    return out;
+  }
+
   getNearbyPlayers(maxDistance: number): PlayerSummary[] {
     const out: PlayerSummary[] = [];
     const selfId = this.getEntityId();
@@ -324,15 +352,25 @@ export class MineflayerFacade implements MinecraftFacade {
   }
 
   findNearestChest(maxDistance: number): ChestRef | null {
-    const found = this.bot.findBlock({
-      matching: (b) => b?.name === 'chest' || b?.name === 'barrel' || b?.name === 'trapped_chest',
-      maxDistance,
-    });
-    if (!found) return null;
-    return {
-      position: { x: found.position.x, y: found.position.y, z: found.position.z },
-      distance: distance3(this.getPosition(), found.position),
-    };
+    try {
+      const found = this.bot.findBlock({
+        matching: (b) => b?.name === 'chest' || b?.name === 'barrel' || b?.name === 'trapped_chest',
+        maxDistance,
+      });
+      if (!found) return null;
+      return {
+        position: { x: found.position.x, y: found.position.y, z: found.position.z },
+        distance: distance3(this.getPosition(), found.position),
+      };
+    } catch (error) {
+      // findBlock dereferences bot.entity: it throws when the bot is not
+      // spawned (see findNearestBlock). The world context is built on every
+      // AI request, so this must never throw.
+      this.logger.debug('nearest chest lookup failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   getNearbyDroppedItems(radius: number): DroppedItemRef[] {
@@ -414,9 +452,14 @@ export class MineflayerFacade implements MinecraftFacade {
       return { status: 'arrived', distance: 0 };
     }
 
+    // Blocks the path must never cross (the "never route through lava"
+    // promise). `Movements.blocksToAvoid` holds block IDS, so names are
+    // resolved through the registry.
+    this.applyAvoid(options.avoid);
+
     try {
       await withTimeout(
-        pathfinder.goto(asVec3(target)),
+        pathfinder.goto(this.buildGoal(target, arriveDistance)),
         options.timeoutMs ?? MOVEMENT.PATH_TIMEOUT_MS,
         'pathfinding',
         options.signal,
@@ -428,15 +471,9 @@ export class MineflayerFacade implements MinecraftFacade {
     } catch (error) {
       // The pathfinder keeps walking towards its goal after a timeout or a
       // cancellation: it re-applies the control states on every physics tick.
-      // Stop it explicitly, or the bot walks off on its own.
-      try {
-        pathfinder.stop();
-      } catch (stopError) {
-        this.logger.debug('pathfinder stop failed', {
-          error: stopError instanceof Error ? stopError.message : String(stopError),
-        });
-      }
-      this.bot.clearControlStates();
+      // Stop it explicitly, or the bot walks off on its own. The goal is
+      // cleared as well: a pending stop() poisons the NEXT walk.
+      this.stopPathing();
       if (options.signal?.aborted || error instanceof AbortedError) {
         return { status: 'cancelled' };
       }
@@ -456,13 +493,30 @@ export class MineflayerFacade implements MinecraftFacade {
 
   stopMoving(): void {
     try {
-      this.getPathfinder()?.stop();
+      this.stopPathing();
       this.bot.clearControlStates();
     } catch (error) {
       this.logger.debug('stopMoving failed', {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  /**
+   * Stops the pathfinder AND clears the goal.
+   *
+   * `bot.pathfinder.stop()` only raises an internal flag; that flag is
+   * cleared by the pathfinder's own stop(), which runs from resetPath - and
+   * that path emits 'path_stop', which rejects the NEXT goto with "Path was
+   * stopped". Clearing the goal right after the stop resets the flag, so the
+   * following walk is not poisoned by this one. Without this, every new
+   * request (which stops the body) broke the bot's ability to walk at all.
+   */
+  private stopPathing(): void {
+    const pathfinder = this.getPathfinder();
+    if (!pathfinder) return;
+    pathfinder.stop();
+    pathfinder.setGoal?.(null);
   }
 
   getGoal(): Vec3Like | null {
@@ -472,7 +526,16 @@ export class MineflayerFacade implements MinecraftFacade {
 
   lookAt(target: Vec3Like, force = false): void {
     try {
-      void this.bot.lookAt(asVec3(target), force);
+      // `bot.lookAt` is async: a failure (the bot is not spawned yet, the
+      // connection dropped) comes back as a REJECTION, which a synchronous
+      // try/catch cannot see. Left unhandled it is an unhandled rejection,
+      // and Node kills the process on those by default - a crash loop on a
+      // hosted service.
+      void Promise.resolve(this.bot.lookAt(asVec3(target), force)).catch((error: unknown) => {
+        this.logger.debug('lookAt failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     } catch (error) {
       this.logger.debug('lookAt failed', {
         error: error instanceof Error ? error.message : String(error),
@@ -484,11 +547,57 @@ export class MineflayerFacade implements MinecraftFacade {
     return (this.bot as unknown as { pathfinder?: PathfinderLike }).pathfinder;
   }
 
+  /**
+   * Builds the pathfinder goal.
+   *
+   * `GoalNear` stops the bot `arriveDistance` short of the target. A plain
+   * Vec3 goal walks onto the exact cell - for a follow that means walking INTO
+   * the player and then shuffling back out again. The pathfinder also expects
+   * a Goal object: a Vec3 has no `isValid()`, so every walk would throw
+   * inside its tick handler.
+   */
+  private buildGoal(target: Vec3Like, arriveDistance: number): Vec3 | PathfinderGoals.Goal {
+    if (arriveDistance <= 0) return asVec3(target);
+    try {
+      return new goals.GoalNear(target.x, target.y, target.z, arriveDistance);
+    } catch (error) {
+      this.logger.debug('GoalNear unavailable, walking to the exact target', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return asVec3(target);
+    }
+  }
+
+  /**
+   * Adds the blocks the path must never cross to the pathfinder's
+   * `blocksToAvoid` (which holds block IDS, not names).
+   */
+  private applyAvoid(avoid: readonly string[] | undefined): void {
+    if (!avoid || avoid.length === 0) return;
+    const pathfinder = this.getPathfinder();
+    const movements = (pathfinder as { movements?: { blocksToAvoid?: Set<number> } } | undefined)?.movements;
+    const target = movements?.blocksToAvoid;
+    if (!target) return;
+    for (const name of avoid) {
+      const block = this.bot.registry?.blocksByName?.[name];
+      if (block && typeof block.id === 'number') target.add(block.id);
+    }
+  }
+
   // --- actions ----------------------------------------------------------
 
   async equipItem(item: string): Promise<boolean> {
     try {
-      await this.bot.equip(item as never, 'hand');
+      // `bot.equip` takes an Item object or a NUMERIC item id. A NAME is
+      // rejected with "Invalid item object in equip", so the bot could never
+      // hold anything - and without holding the block it could never place
+      // one either. Resolve the name to its id first.
+      const id = this.itemId(item);
+      if (id === null) {
+        this.logger.debug('unknown item name', { item });
+        return false;
+      }
+      await this.bot.equip(id, 'hand');
       return true;
     } catch (error) {
       this.logger.debug('equip failed', {
@@ -549,7 +658,22 @@ export class MineflayerFacade implements MinecraftFacade {
       for (const candidate of candidates) {
         const reference = this.bot.blockAt(asVec3(candidate.reference));
         if (!reference) continue;
-        await this.bot.placeBlock(reference, candidate.face);
+        try {
+          await this.bot.placeBlock(reference, candidate.face);
+        } catch (error) {
+          // `bot.placeBlock` REJECTS when the server refuses the placement
+          // (an entity in the way, the wrong item in hand, ...). The other
+          // references are still worth a try: every candidate puts the block
+          // on the SAME target, but the server can accept one reference and
+          // refuse another.
+          this.logger.debug('placement against this reference failed', {
+            position,
+            blockName,
+            reference: candidate.reference,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          continue;
+        }
         // Remember what the bot built, so it never mines it up again.
         this.ownBlocks.add(blockKey(target));
         return true;
@@ -597,7 +721,13 @@ export class MineflayerFacade implements MinecraftFacade {
 
   async eat(item?: string): Promise<boolean> {
     try {
-      if (item !== undefined) await this.bot.equip(item as never, 'hand');
+      if (item !== undefined) {
+        // Same contract as equipItem: `bot.equip` wants a numeric id, not a
+        // name.
+        const id = this.itemId(item);
+        if (id === null) return false;
+        await this.bot.equip(id, 'hand');
+      }
       await this.bot.consume();
       return true;
     } catch (error) {
@@ -644,8 +774,11 @@ export class MineflayerFacade implements MinecraftFacade {
         // Player inventory -> chest. `bot.transfer` REQUIRES a destination
         // range: without destStart it threw "destination full" and every
         // deposit failed.
-        sourceStart: window.inventoryStart ?? 9,
-        sourceEnd: window.inventoryEnd ?? 36,
+        // The player's inventory inside a CONTAINER window does NOT start at
+        // slot 9: a chest window puts the chest in 0..26 and the player's
+        // inventory in 27..62 (63 exclusive).
+        sourceStart: window.inventoryStart ?? 27,
+        sourceEnd: window.inventoryEnd ?? 63,
         destStart: 0,
         destEnd: window.inventoryStart ?? 27,
       });
@@ -697,7 +830,12 @@ export class MineflayerFacade implements MinecraftFacade {
     const block = this.bot.blockAt(asVec3(position));
     if (!block) return null;
     try {
-      await this.bot.openContainer(block);
+      // Keep the window mineflayer opened: that is the one the deposit has
+      // to close again. `bot.currentWindow` can already have been reset (a
+      // close_window packet raced in), and then the container would be left
+      // open on the server.
+      const opened = (await this.bot.openContainer(block)) as unknown as WindowLike | null | undefined;
+      if (opened) return opened;
       return (this.bot as unknown as { currentWindow?: WindowLike | null }).currentWindow ?? null;
     } catch (error) {
       this.logger.warn('could not open container', {
@@ -726,9 +864,12 @@ export class MineflayerFacade implements MinecraftFacade {
 
 /** Minimal structural view of the pathfinder plugin. */
 interface PathfinderLike {
-  goto(target: Vec3Like): Promise<unknown>;
+  goto(target: Vec3Like | PathfinderGoals.Goal): Promise<unknown>;
   stop(): void;
   goal?: Vec3Like;
+  /** Clears the current goal; used to reset the pathfinder after a stop. */
+  setGoal?(goal: unknown): void;
+  movements?: { blocksToAvoid?: Set<number> };
 }
 
 interface WindowLike {

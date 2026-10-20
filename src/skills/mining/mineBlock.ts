@@ -10,8 +10,14 @@ import type { ActionType } from '../../types/actions.js';
 import { CONFLICT_GROUP } from '../../types/task.js';
 import type { ExecutionContext } from '../../types/task.js';
 import { AntiGriefRules } from '../../safety/antiGrief.js';
+import { BLOCK_TOOL, SOFT_BLOCKS } from '../../config/constants.js';
 import { describeError, failedResult, isCancellation, normaliseBlockName } from '../internal/helpers.js';
-import { humaniseBlockName, MAX_BLOCKS_PER_TASK, runMining } from './shared.js';
+import { humaniseBlockName, MAX_BLOCKS_PER_TASK, resolveResourceNames, runMining } from './shared.js';
+
+/** Does this name already name a block the bot knows how to mine? */
+function isKnownBlock(name: string): boolean {
+  return BLOCK_TOOL[name] !== undefined || SOFT_BLOCKS.has(name);
+}
 
 export class MineBlockSkill implements Skill<MineParams> {
   public readonly name: ActionType = 'mine_block';
@@ -28,6 +34,14 @@ export class MineBlockSkill implements Skill<MineParams> {
       return failedResult('I need to know which block to mine.', 0);
     }
 
+    // The request may name the block in words ("oak logs", "iron") instead of
+    // by its block id, so the phrase is resolved to real block names first.
+    // A name that already names a block the bot knows is mined as it is.
+    const names = isKnownBlock(blockName) ? [blockName] : resolveResourceNames(blockName);
+    if (names.length === 0) {
+      return failedResult(`I don't know how to mine "${params.blockName}".`, 0);
+    }
+
     const requested = Math.floor(params.count);
     if (!Number.isFinite(requested) || requested <= 0) {
       return failedResult('I need a count of at least 1 block to mine.', 0);
@@ -38,7 +52,7 @@ export class MineBlockSkill implements Skill<MineParams> {
 
     try {
       const run = await runMining(this.facade, ctx, {
-        names: [blockName],
+        names,
         count: target,
         label,
         rules: this.rules,

@@ -297,7 +297,7 @@ describe('toAction - hostile input is rejected', () => {
 
   it('rejects absurdly long coordinates', () => {
     expect(error('goto', ['9'.repeat(20), '64', '0'])).toContain('usage: !goto');
-    expect(error('goto', ['0', '64', '1'.repeat(40)]).length).toBeGreaterThan(0);
+    expect(error('goto', ['0', '64', '1'.repeat(40)])).toContain('usage: !goto');
   });
 
   it('rejects a count that overflows the safe integer range', () => {
@@ -396,20 +396,29 @@ describe('parseLocationName', () => {
 
 describe('command sets', () => {
   it('classifies every command the parser can convert as deterministic', () => {
-    for (const name of [
-      'come',
-      'goto',
-      'follow',
-      'guard',
-      'stop',
-      'eat',
-      'equip',
-      'drop',
-      'mine',
-      'deposit',
-      'withdraw',
-    ]) {
-      expect(DETERMINISTIC_COMMANDS.has(name)).toBe(true);
+    // Every case `toAction` can convert must be reachable as a deterministic
+    // command. A convertible command that is missing from the set is answered
+    // with "unknown command" instead of doing the work, so the list below has
+    // to cover every branch of the parser - not just the obvious ones.
+    const convertible: ReadonlyArray<readonly [string, string[]]> = [
+      ['come', []],
+      ['goto', ['1', '2', '3']],
+      ['follow', ['Alice']],
+      ['guard', ['Alice']],
+      ['stop', []],
+      ['stay', []],
+      ['eat', []],
+      ['equip', ['axe']],
+      ['drop', ['dirt']],
+      ['mine', ['oak_log']],
+      ['deposit', []],
+      ['withdraw', ['cobblestone']],
+      ['pickup', ['dirt']],
+    ];
+    for (const [name, args] of convertible) {
+      expect(DETERMINISTIC_COMMANDS.has(name), name).toBe(true);
+      // The parser really converts it - otherwise the name above is a lie.
+      expect('error' in toAction(name, args), name).toBe(false);
     }
   });
 

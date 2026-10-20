@@ -60,17 +60,14 @@ export class TaskManager {
   /**
    * Claims the body for a conflict group.
    *
-   * An existing task in the same group is cancelled first (the newest
-   * instruction wins), which matches how players actually talk to the bot:
-   * "stop, actually come here" should not need two commands.
+   * An existing task in the same group is cancelled as the new one takes the
+   * group over (the newest instruction wins), which matches how players
+   * actually talk to the bot: "stop, actually come here" should not need two
+   * commands.
    */
   start(input: CreateTaskInput): TaskHandle {
     const group: TaskConflictGroup = input.conflictGroup;
-    const existingId = this.byGroup.get(group);
-    if (existingId !== undefined) {
-      this.logger.debug('cancelling conflicting task', { group, previous: existingId });
-      this.cancel(existingId, `superseded by ${input.owner}`);
-    }
+    const previousId = this.byGroup.get(group);
 
     const id = randomUUID();
     const controller = new AbortController();
@@ -119,7 +116,15 @@ export class TaskManager {
     };
 
     this.tasks.set(id, entry);
+    // The group is claimed BEFORE the previous holder is cancelled. Cancelling
+    // runs the cleanups and the settle listener, and either of them may start
+    // a task of its own; claiming the group afterwards would silently drop
+    // that task's claim and leave two live tasks in the same body group.
     if (group !== 'none') this.byGroup.set(group, id);
+    if (previousId !== undefined) {
+      this.logger.debug('cancelling conflicting task', { group, previous: previousId });
+      this.cancel(previousId, `superseded by ${input.owner}`);
+    }
 
     this.logger.debug('task created', {
       id,
@@ -139,7 +144,7 @@ export class TaskManager {
     else fn();
   }
 
-/**
+  /**
    * Aborts a task. Safe to call from any state, including before `run`.
    * Settlement happens immediately so `!stop` never waits on anything.
    */
@@ -148,12 +153,14 @@ export class TaskManager {
     if (!entry || entry.settled) return;
 
     entry.settled = true;
-    // Aborting first is what makes cancellation instant for skills and AI calls.
-    if (!entry.controller.signal.aborted) entry.controller.abort(new Error(reason));
-
+    // The record is updated before the abort: abort listeners run
+    // synchronously, and the skill being stopped must see the task as
+    // cancelled rather than as still running.
     entry.record.status = 'cancelled';
     entry.record.finishedAt = Date.now();
     entry.record.error = reason;
+    // Aborting first is what makes cancellation instant for skills and AI calls.
+    if (!entry.controller.signal.aborted) entry.controller.abort(new Error(reason));
 
     this.release(entry);
     this.logger.info('task cancelled', { id: taskId, reason, type: entry.record.type });
@@ -172,6 +179,13 @@ export class TaskManager {
     entry.record.status = status;
     entry.record.finishedAt = Date.now();
     if (error) entry.record.error = error;
+    if (status === 'cancelled') {
+      // A task reported as cancelled has to stop: the abort is what reaches
+      // the skill and the AI call, exactly as `cancel()` does.
+      const reason = entry.record.error ?? 'cancelled';
+      entry.record.error = reason;
+      if (!entry.controller.signal.aborted) entry.controller.abort(new Error(reason));
+    }
     this.release(entry);
     this.logger.info('task finished', { id: taskId, status, type: entry.record.type });
     this.onSettle?.(entry.record);

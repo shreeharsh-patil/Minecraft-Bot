@@ -29,11 +29,17 @@ export class LookAtSkill implements Skill<LookParams> {
     ) {
       return failedResult('That is not a valid thing to look at.', 0);
     }
+    // A cancelled action must never reach the world: the bot would still turn
+    // its head at a target nobody wants any more.
+    if (ctx.signal.aborted) {
+      return { ok: false, detail: 'Cancelled before I started looking.', count: 0 };
+    }
 
     const durationMs = clamp(params.durationMs ?? DEFAULT_LOOK_MS, 0, MAX_LOOK_MS);
-    this.facade.stopMoving();
 
     try {
+      // Looking means standing still: the body stops, then the bot turns.
+      this.facade.stopMoving();
       this.facade.lookAt(position, true);
       if (durationMs > 0) await sleep(durationMs, ctx.signal);
       return { ok: true, detail: 'Looking.', count: 0 };

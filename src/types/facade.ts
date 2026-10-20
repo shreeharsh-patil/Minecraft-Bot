@@ -7,6 +7,10 @@
  *  - there is exactly one place that knows how to drive the real bot.
  */
 import type { Vec3Like, BlockPos, EntitySummary, PlayerSummary, TimeOfDay } from './world.js';
+// The contract is written in the world value types, so they travel with it:
+// whoever implements the facade needs them as well, and importing them from
+// the contract module keeps the two from drifting apart.
+export type { Vec3Like, BlockPos, EntitySummary, PlayerSummary, TimeOfDay } from './world.js';
 
 export type Facing = 'north' | 'east' | 'south' | 'west';
 
@@ -41,7 +45,12 @@ export interface NavigationOptions {
   signal?: AbortSignal;
   /** Give up and report rather than pathing forever. */
   timeoutMs?: number;
-  /** Skip this many blocks vertically (stairs, ledges). */
+  /**
+   * Give up the path search after this many nodes were explored.
+   *
+   * A ceiling on the search itself: a bot that cannot reach the goal has to
+   * say so instead of walking the whole world looking for a way there.
+   */
   maxNodes?: number;
   /** Stop this many blocks short of the goal. */
   arriveDistance?: number;
@@ -59,6 +68,15 @@ export type MoveResult =
 export interface MinecraftFacade {
   readonly username: string;
   readonly dimension: string;
+  /**
+   * The dimension the bot is in, as a method.
+   *
+   * The AI layer asks the world for the dimension through a method (its
+   * `WorldContextSource` contract), so an implementation that is used as a
+   * world source has to offer it here too. It is optional because not every
+   * facade is a world source - the mineflayer one provides it.
+   */
+  getDimension?(): string;
 
   // --- state -----------------------------------------------------------
   getPosition(): Vec3Like;
@@ -79,13 +97,26 @@ export interface MinecraftFacade {
    * player just asked for.
    */
   isOwnBlock(position: BlockPos): boolean;
-  /** Is this block safe to stand on / break? Wraps the danger rules. */
+  /**
+   * Is this block DANGEROUS to stand on / break?
+   *
+   * Wraps the danger rules (lava, fire, cactus, ...). `true` means "keep
+   * away from it" - the answer is the opposite of the question "may I stand
+   * here?", so do not read it as an all-clear.
+   */
   isDangerous(position: BlockPos): boolean;
   findNearestBlock(name: string, maxDistance: number): BlockRef | null;
   findBlocks(name: string, maxDistance: number, limit?: number): BlockRef[];
   /** Blocks near the bot worth telling the model about, grouped by name. */
   scanNearbyBlocks(radius: number): BlockRef[];
   getNearbyPlayers(maxDistance: number): PlayerSummary[];
+  /**
+   * Every player that is ONLINE, per the server's tab list.
+   *
+   * Optional: a facade that cannot answer it falls back to a spatial scan.
+   * Presence decisions need this - "online" is not the same as "nearby".
+   */
+  getOnlinePlayers?(): readonly { name: string }[];
   getNearbyEntities(maxDistance: number): EntitySummary[];
   getNearestPlayer(name: string): PlayerSummary | null;
   findNearestChest(maxDistance: number): ChestRef | null;

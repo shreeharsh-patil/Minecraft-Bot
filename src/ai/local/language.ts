@@ -127,33 +127,90 @@ export interface CountExtraction {
   rest: string;
 }
 
+/** A quantity found in a clause, with the span of words it covers. */
+interface QuantityHit {
+  count: number;
+  /** Index of the first word of the quantity. */
+  start: number;
+  /** Index just past the last word of the quantity. */
+  end: number;
+}
+
 /**
- * Finds the first quantity in a clause and removes it. Never invents a count:
- * "mine logs" yields nothing (the caller keeps its default), "mine 20 logs"
- * becomes {count: 20, rest: "mine logs"}.
+ * The quantity starting at `index`, if there is one.
+ *
+ * A phrase beats a bare number word at the same position ("a couple of" is
+ * one quantity, not a stray "couple"), and the longest run wins ("twenty
+ * five" is 25, not 20 with an orphan "five").
  */
-export function extractCount(clause: string): CountExtraction | undefined {
-  const words = tokenize(clause);
-  // Multi-word quantities (longest phrases are earlier in the table).
+function quantityAt(words: readonly string[], index: number): QuantityHit | undefined {
+  let best: QuantityHit | undefined;
   for (const [phrase, value] of QUANTITY_PHRASES) {
     const phraseWords = phrase.split(' ');
-    for (let start = 0; start + phraseWords.length <= words.length; start++) {
-      const window = words.slice(start, start + phraseWords.length);
-      if (window.join(' ') !== phrase) continue;
-      const rest = [...words.slice(0, start), ...words.slice(start + phraseWords.length)].join(' ');
-      return { count: value, rest };
-    }
+    if (index + phraseWords.length > words.length) continue;
+    if (words.slice(index, index + phraseWords.length).join(' ') !== phrase) continue;
+    if (best !== undefined && best.end - best.start >= phraseWords.length) continue;
+    best = { count: value, start: index, end: index + phraseWords.length };
   }
-  // Number runs, longest first so "twenty five" beats "twenty" + orphan "five".
+  if (best !== undefined) return best;
+  // Number runs, longest first so "twenty five" beats "twenty" + "five".
   for (let length = 3; length >= 1; length--) {
-    for (let start = 0; start + length <= words.length; start++) {
-      const run = numberRun(words.slice(start, start + length));
-      if (run === undefined) continue;
-      const rest = [...words.slice(0, start), ...words.slice(start + length)].join(' ');
-      return { count: run, rest };
-    }
+    if (index + length > words.length) continue;
+    const run = numberRun(words.slice(index, index + length));
+    if (run === undefined) continue;
+    return { count: run, start: index, end: index + length };
   }
   return undefined;
+}
+
+/** Every quantity in the word list, in word order. */
+function findQuantities(words: readonly string[]): QuantityHit[] {
+  const hits: QuantityHit[] = [];
+  let index = 0;
+  while (index < words.length) {
+    const hit = quantityAt(words, index);
+    if (hit === undefined) {
+      index += 1;
+      continue;
+    }
+    hits.push(hit);
+    index = hit.end;
+  }
+  return hits;
+}
+
+/** The quantity nearest to a word index (fewest words in between). */
+function closestQuantity(hits: readonly QuantityHit[], index: number): QuantityHit | undefined {
+  let best: QuantityHit | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const hit of hits) {
+    const distance = hit.end <= index ? index - hit.end : hit.start >= index ? hit.start - index : 0;
+    if (distance >= bestDistance) continue;
+    best = hit;
+    bestDistance = distance;
+  }
+  return best;
+}
+
+/**
+ * Finds a quantity in a clause and removes it. Never invents a count:
+ * "mine logs" yields nothing (the caller keeps its default), "mine 20 logs"
+ * becomes {count: 20, rest: "mine logs"}.
+ *
+ * `near` is the word index of the thing the count belongs to (the planner
+ * passes the position of the named target). The quantity closest to that
+ * position wins, so "mine 20 logs and 5 stone" counts five stone instead of
+ * stealing the twenty that belongs to the logs. Without it the first
+ * quantity of the clause is used.
+ */
+export function extractCount(clause: string, near?: number): CountExtraction | undefined {
+  const words = tokenize(clause);
+  const hits = findQuantities(words);
+  if (hits.length === 0) return undefined;
+  const hit = near === undefined ? hits[0] : closestQuantity(hits, near);
+  if (hit === undefined) return undefined;
+  const rest = [...words.slice(0, hit.start), ...words.slice(hit.end)].join(' ');
+  return { count: hit.count, rest };
 }
 
 // --- fuzzy matching -----------------------------------------------------------
@@ -313,6 +370,17 @@ export interface VocabEntry {
 const LOG_SPECIES = [
   'oak', 'birch', 'spruce', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry',
 ] as const;
+
+/**
+ * True when the text names a wood species instead of generic wood.
+ *
+ * "logs" and "wood" may be served by whatever tree stands nearby, but a
+ * player who names a species ("oak logs") must get exactly that species -
+ * swapping it for the nearest tree would mine the wrong block.
+ */
+export function mentionsLogSpecies(text: string): boolean {
+  return LOG_SPECIES.some((species) => text.includes(species.replace('_', ' ')));
+}
 
 function buildVocabulary(): VocabEntry[] {
   const entries: VocabEntry[] = [];

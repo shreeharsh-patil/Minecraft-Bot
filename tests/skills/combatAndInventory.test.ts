@@ -18,6 +18,8 @@ describe('AttackHostileSkill - the target moves', () => {
       position: { x: 0, y: 64, z: 0 },
       entities: [{ name: 'zombie', type: 'hostile', distance: 4, position: { x: 4, y: 64, z: 0 } }],
     });
+    const skill = new AttackHostileSkill(facade);
+    const test = createTestContext();
 
     // The mob walks away while the bot is closing in on it.
     const originalMove = facade.moveToPosition.bind(facade);
@@ -28,19 +30,20 @@ describe('AttackHostileSkill - the target moves', () => {
         first = false;
         facade.moveEntity('zombie', { x: 12, y: 64, z: 0 });
       }
+      // Stop the fight as soon as the bot has chased the mob to its NEW
+      // spot. Doing it from the navigation call keeps the test independent
+      // of how fast the machine is: the old version waited a fixed 700ms for
+      // the second attack tick and failed on a slow machine.
+      if (target.x === 12) test.abort();
       return result;
     };
 
-    const skill = new AttackHostileSkill(facade);
-    const test = createTestContext();
-
-    const running = skill.execute({}, test.ctx);
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    test.abort();
-    await running;
+    const result = await skill.execute({}, test.ctx);
 
     // The bot chased the mob to where it had moved to.
     expect(facade.moveToPositionCalls.some((call) => call.target.x === 12)).toBe(true);
+    // The fight was stopped by the abort, not by the skill running out of time.
+    expect(result.ok).toBe(false);
   });
 });
 

@@ -26,12 +26,29 @@ export interface CompletionResult {
   usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
 }
 
+/**
+ * Kinds where retrying the SAME provider cannot plausibly succeed: the
+ * request itself is wrong, the credentials were rejected, or the caller
+ * cancelled the attempt.
+ */
+const NON_RETRYABLE_KINDS: ReadonlySet<ProviderErrorKind> = new Set([
+  'invalid_request',
+  'auth',
+  'aborted',
+]);
+
 export class ProviderError extends Error {
   public readonly provider: ProviderName;
   /** Drives both fallback and circuit-breaker decisions. */
   public readonly kind: ProviderErrorKind;
   public readonly statusCode?: number;
-  /** True when retrying the same provider could plausibly succeed. */
+  /**
+   * True when retrying the same provider could plausibly succeed.
+   *
+   * Defaults to false for the kinds where a retry cannot help
+   * (`invalid_request`, `auth`, `aborted`) and to true for every other
+   * kind. An explicit `opts.retryable` always wins.
+   */
   public readonly retryable: boolean;
 
   constructor(
@@ -45,7 +62,7 @@ export class ProviderError extends Error {
     this.provider = provider;
     this.kind = kind;
     this.statusCode = opts.statusCode;
-    this.retryable = opts.retryable ?? kind !== 'invalid_request';
+    this.retryable = opts.retryable ?? !NON_RETRYABLE_KINDS.has(kind);
   }
 }
 
@@ -75,24 +92,38 @@ export interface AiProvider {
 
 export type ProviderTier = 'fast' | 'planning';
 
-/** Per-provider rolling health statistics used by the router. */
+/** Circuit breaker state of one provider. */
+export interface ProviderCircuit {
+  readonly state: 'closed' | 'open' | 'half_open';
+  /** When the circuit opened; null while it is closed. */
+  readonly openedAt: number | null;
+  /** When an open circuit may probe again; null unless it is open. */
+  readonly until: number | null;
+}
+
+/**
+ * Per-provider rolling health statistics used by the router.
+ *
+ * A snapshot, not a live view: the pool hands out copies, so every field
+ * is read-only. Writing to one would silently change nothing.
+ */
 export interface ProviderStats {
   readonly name: ProviderName;
-  requests: number;
-  successes: number;
-  failures: number;
-  timeouts: number;
-  rateLimited: number;
-  consecutiveFailures: number;
+  readonly requests: number;
+  readonly successes: number;
+  readonly failures: number;
+  readonly timeouts: number;
+  readonly rateLimited: number;
+  readonly consecutiveFailures: number;
   /** Exponential moving average of latency. */
-  avgLatencyMs: number;
-  lastLatencyMs: number | null;
-  lastUsedAt: number | null;
-  lastSuccessAt: number | null;
-  available: boolean;
+  readonly avgLatencyMs: number;
+  readonly lastLatencyMs: number | null;
+  readonly lastUsedAt: number | null;
+  readonly lastSuccessAt: number | null;
+  readonly available: boolean;
   /** Circuit breaker state. */
-  circuit: { state: 'closed' | 'open' | 'half_open'; openedAt: number | null; until: number | null };
-  tier: ProviderTier;
+  readonly circuit: ProviderCircuit;
+  readonly tier: ProviderTier;
 }
 
 export type { ProviderName };

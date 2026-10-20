@@ -12,10 +12,14 @@
  * qualifier ("api", "private", "refresh"). This handles `API_KEY`, `api-key`,
  * `x-api-key`, `apiKey` and `GROQ_API_KEY` uniformly, while leaving ordinary
  * names such as `username` or `model` alone.
+ *
+ * A trailing index is not part of the word: `apiKey2` is a credential just as
+ * much as `apiKey`.
  */
 const SECRET_WORDS: ReadonlySet<string> = new Set([
   'apikey',
   'authorization',
+  'bearer',
   'cookie',
   'credential',
   'credentials',
@@ -25,8 +29,10 @@ const SECRET_WORDS: ReadonlySet<string> = new Set([
   'otp',
   'passwd',
   'password',
+  'passphrase',
   'pin',
   'privatekey',
+  'pwd',
   'secret',
   'session',
   'token',
@@ -45,12 +51,20 @@ const SECRET_QUALIFIERS: ReadonlySet<string> = new Set([
   'x',
 ]);
 
-/** Splits a key into lowercase word tokens. */
+/**
+ * Splits a key into lowercase word tokens.
+ *
+ * A digit is always its own token, so the counter in `apiKey2` cannot hide
+ * the word `key` from the matcher.
+ */
 function tokenizeKey(key: string): string[] {
   return key
     // split camelCase / PascalCase boundaries
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .toLowerCase()
+    // split letter/digit boundaries ("key2" -> "key 2", "utf8" -> "utf 8")
+    .replace(/([a-z])([0-9])/g, '$1 $2')
+    .replace(/([0-9])([a-z])/g, '$1 $2')
     // split on separators
     .split(/[^a-z0-9]+/)
     .filter((part) => part.length > 0);
@@ -62,10 +76,20 @@ const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
   /\bgsk_[A-Za-z0-9_-]{16,}\b/g, // groq
   /\bAIza[A-Za-z0-9_-]{20,}\b/g, // google
   /\bsk-or-v1-[A-Za-z0-9]{16,}\b/g, // openrouter
+  /\b(?:sk|rk)_live_[A-Za-z0-9]{16,}\b/g, // stripe
+  /\bya29\.[A-Za-z0-9_-]{20,}\b/g, // google oauth access token
+  /\b(?:gh[pousr]|glpat|github_pat)_[A-Za-z0-9_-]{20,}\b/g, // github / gitlab
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, // slack
+  /\bnpm_[A-Za-z0-9]{30,}\b/g, // npm
+  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, // aws access key id
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g, // jwt
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, // uuid-ish tokens
   /\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*/gi,
   /\bMCToken:[A-Za-z0-9+/=._-]{20,}/gi,
+  // A PEM private key block (the body is base64, the header is enough to spot).
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+  // The same block without its footer (a truncated paste).
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[A-Za-z0-9+/= ]*/g,
 ];
 
 export const REDACTED = '[REDACTED]';
@@ -96,9 +120,10 @@ export function scrubText(input: string): string {
   for (const pattern of SECRET_VALUE_PATTERNS) {
     out = out.replace(pattern, REDACTED);
   }
-  // KEY=value style pairs, e.g. GROQ_API_KEY=abc123
+  // KEY=value style pairs, e.g. GROQ_API_KEY=abc123. A quoted value is
+  // consumed whole: `PASSWORD="two words"` must not leak its second word.
   out = out.replace(
-    /([A-Z0-9_]*(?:API_KEY|SECRET|PASSWORD|TOKEN|ACCESS)[A-Z0-9_]*)\s*=\s*[^\s,;]+/gi,
+    /([A-Z0-9_]*(?:API_KEY|SECRET|PASSWORD|TOKEN|ACCESS)[A-Z0-9_]*)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
     `$1=${REDACTED}`,
   );
   return out;

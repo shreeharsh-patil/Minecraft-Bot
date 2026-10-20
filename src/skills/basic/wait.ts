@@ -20,8 +20,11 @@ export class WaitSkill implements Skill<WaitParams> {
     const durationMs = clamp(Math.floor(params.durationMs ?? 0), 0, MAX_WAIT_MS);
     if (durationMs === 0) return { ok: true, detail: 'No need to wait.', count: 0 };
 
-    this.facade.stopMoving();
     try {
+      // Idle means idle: the body stops before the wait, and the wait is what
+      // keeps it there. The facade call is inside the try, so a facade that
+      // fails comes back as a typed result instead of a thrown error.
+      this.facade.stopMoving();
       await sleep(durationMs, ctx.signal);
       return { ok: true, detail: `Waited ${Math.round(durationMs / 1000)}s.`, count: 0 };
     } catch (error) {

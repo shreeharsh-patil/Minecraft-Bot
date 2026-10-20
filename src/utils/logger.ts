@@ -46,9 +46,78 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Reads one property. A getter that throws must not take the caller down. */
+function safeRead(target: object, key: string): unknown {
+  try {
+    return (target as Record<string, unknown>)[key];
+  } catch {
+    return '[unreadable]';
+  }
+}
+
+/** Own enumerable keys of an object. A hostile proxy must not throw here. */
+function ownKeys(target: object): string[] {
+  try {
+    return Object.keys(target);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Defines a field on a record. `defineProperty` (not assignment) so that a
+ * key such as "__proto__" becomes a field of its own instead of silently
+ * swapping the prototype of the record.
+ */
+function setField(record: LogFields, key: string, value: unknown): void {
+  Object.defineProperty(record, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
+/** Coerces an unknown value to scrubbed text. Never throws. */
+function safeText(value: unknown): string {
+  try {
+    if (typeof value === 'string') return scrubText(value);
+    if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+      return scrubText(String(value));
+    }
+    if (value === undefined || value === null) return '';
+    return '[unserialisable]';
+  } catch {
+    return '[unreadable]';
+  }
+}
+
+/** ISO timestamp, even when the injected clock is broken. */
+function safeTimestamp(now: () => Date): string {
+  try {
+    const date = now();
+    return Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString();
+  } catch {
+    return new Date(0).toISOString();
+  }
+}
+
+/** Merges field layers. A hostile getter must not throw while merging. */
+function mergeFields(...sources: LogFields[]): LogFields {
+  const out: LogFields = {};
+  for (const source of sources) {
+    for (const key of ownKeys(source)) setField(out, key, safeRead(source, key));
+  }
+  return out;
+}
+
 /**
  * Depth-limited, cycle-safe serialisation. Prevents a hostile object graph
  * (or a mineflayer entity) from producing a multi-megabyte log line.
+ *
+ * It also never throws: a getter that raises, a proxy that lies or an Error
+ * with a non-string message would otherwise propagate out of the logger and
+ * take the caller down with it.
  */
 function safeSerialize(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
   if (value === null) return null;
@@ -59,25 +128,45 @@ function safeSerialize(value: unknown, depth = 0, seen = new WeakSet<object>()):
   if (t === 'undefined') return undefined;
   if (t === 'function' || t === 'symbol') return `[${t}]`;
   if (value instanceof Error) {
-    return { name: value.name, message: scrubText(value.message), stack: scrubText(value.stack ?? '') };
+    return {
+      name: safeText(safeRead(value, 'name')),
+      message: safeText(safeRead(value, 'message')),
+      stack: safeText(safeRead(value, 'stack')),
+    };
   }
+  // A Date, Map, Set or RegExp has no own enumerable fields: without this it
+  // would be serialised as an empty object and the information would be lost.
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? '[invalid date]' : value.toISOString();
+  }
+  if (value instanceof Map) return safeSerialize(Object.fromEntries(value), depth + 1, seen);
+  if (value instanceof Set) return safeSerialize([...value], depth + 1, seen);
+  if (value instanceof RegExp) return value.source;
   if (depth >= 4) return '[depth-limit]';
   if (Array.isArray(value)) {
     if (seen.has(value)) return '[circular]';
     seen.add(value);
-    return value.slice(0, 20).map((v) => safeSerialize(v, depth + 1, seen));
+    const items = value.slice(0, 20).map((v) => safeSerialize(v, depth + 1, seen));
+    // A sibling that points at the same array is not a cycle: only the path
+    // currently being walked may be "seen".
+    seen.delete(value);
+    return items;
   }
   if (isPlainObject(value) || t === 'object') {
     const obj = value as object;
     if (seen.has(obj)) return '[circular]';
     seen.add(obj);
     const out: LogFields = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    for (const k of ownKeys(obj)) {
+      const v = safeRead(obj, k);
       // Recurse: the old code only redacted the TOP level, so a nested
       // `apiKey` was printed in full and a nested circular object crashed
       // JSON.stringify inside the logger.
-      out[k] = isSecretKey(k) ? REDACTED : safeSerialize(v, depth + 1, seen);
+      // The key is scrubbed as well: a key is content too, and a key that
+      // carries a newline would forge a second log line.
+      setField(out, scrubText(k), isSecretKey(k) ? REDACTED : safeSerialize(v, depth + 1, seen));
     }
+    seen.delete(obj);
     return out;
   }
   // Only reachable for exotic primitives (e.g. Symbol on old runtimes).
@@ -120,15 +209,24 @@ export function createLogger(options: LoggerOptions = {}): Logger {
   const make = (boundFields: LogFields): Logger => {
     const emit = (lvl: Exclude<LogLevel, 'silent'>, msg: string, fields?: LogFields): void => {
       if (LEVEL_WEIGHT[lvl] < threshold) return;
-      const record: LogFields = {
-        // User fields come first: the reserved keys are written last so a
-        // field named "level" or "ts" cannot rewrite the record's metadata.
-        ...(safeSerialize({ ...base, ...boundFields }) as LogFields),
-        ...(fields ? (safeSerialize(fields) as LogFields) : {}),
-        ts: now().toISOString(),
-        level: lvl,
-        msg: scrubText(msg),
-      };
+      const text = safeText(msg);
+      let record: LogFields;
+      try {
+        record = {
+          // User fields come first: the reserved keys are written last so a
+          // field named "level" or "ts" cannot rewrite the record's metadata.
+          ...(safeSerialize(base) as LogFields),
+          ...(safeSerialize(boundFields) as LogFields),
+          ...(fields ? (safeSerialize(fields) as LogFields) : {}),
+          ts: safeTimestamp(now),
+          level: lvl,
+          msg: text,
+        };
+      } catch {
+        // A logger that throws takes the caller down with it: degrade to a
+        // minimal record instead of propagating the failure.
+        record = { ts: safeTimestamp(now), level: lvl, msg: text };
+      }
       if (format === 'json') {
         write(JSON.stringify(record));
       } else {
@@ -153,7 +251,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
       info: (m, f) => emit('info', m, f),
       warn: (m, f) => emit('warn', m, f),
       error: (m, f) => emit('error', m, f),
-      child: (fields) => make({ ...boundFields, ...fields }),
+      child: (fields) => make(mergeFields(boundFields, fields)),
     };
   };
 

@@ -11,10 +11,31 @@ import { CONFLICT_GROUP } from '../../types/task.js';
 import type { ExecutionContext } from '../../types/task.js';
 import { AntiGriefRules } from '../../safety/antiGrief.js';
 import { describeError, failedResult, isCancellation, normaliseBlockName } from '../internal/helpers.js';
-import { MAX_BLOCKS_PER_TASK, resolveResourceNames, runMining } from './shared.js';
+import { MAX_BLOCKS_PER_TASK, humaniseBlockName, resolveResourceNames, runMining } from './shared.js';
 
 /** Location names that mean "around here". */
-const HERE_LOCATIONS: ReadonlySet<string> = new Set(['nearest', 'here', 'around', 'current']);
+const HERE_LOCATIONS: ReadonlySet<string> = new Set([
+  'nearest',
+  'here',
+  'around',
+  'current',
+  'around here',
+  'right here',
+  'near here',
+  'nearby',
+]);
+
+/**
+ * The location as a phrase, the way a person says it.
+ *
+ * The validator canonicalises a location ("the mine" -> "the_mine"), so the
+ * underscores are turned back into spaces: the bot has to answer with the
+ * words the player used, and it has to recognise "around here" as the place
+ * the player is standing in.
+ */
+function locationPhrase(location: string): string {
+  return location.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+}
 
 export class CollectResourceSkill implements Skill<CollectParams> {
   public readonly name: ActionType = 'collect_resource';
@@ -41,14 +62,15 @@ export class CollectResourceSkill implements Skill<CollectParams> {
       return failedResult('I need a count of at least 1 to collect.', 0);
     }
     const target = Math.min(requested, MAX_BLOCKS_PER_TASK);
-    const label = params.resource.replace(/[_-]+/g, ' ').trim();
+    const label = humaniseBlockName(resource);
 
     // A named location ("from the mine") can only be honoured if the bot
     // knows where that is. It does not - so say so instead of mining the
-    // nearest ore anywhere and then claiming it came from there.
-    const from = typeof params.from === 'string' ? params.from.trim().toLowerCase() : '';
+    // nearest ore anywhere and then claiming it came from there. The
+    // locations that mean "around here" are the ones the bot does know.
+    const from = typeof params.from === 'string' ? locationPhrase(params.from) : '';
     if (from.length > 0 && !HERE_LOCATIONS.has(from)) {
-      return failedResult(`I don't know where "${params.from}" is.`, 0);
+      return failedResult(`I don't know where "${from}" is.`, 0);
     }
     const where = from.length > 0 ? ` from ${from}` : '';
 
@@ -71,9 +93,13 @@ export class CollectResourceSkill implements Skill<CollectParams> {
       if (run.mined >= target) {
         return { ok: true, detail: `Collected ${run.mined} ${label}${where}.`, count: run.mined };
       }
+      // The reason says why the run stopped, the count says how much of the
+      // request it got. Only this line reaches the player, so without the
+      // count a partly finished collection reads like a total failure.
+      const reason = run.reason ?? `I only collected ${run.mined} of ${target} ${label}.`;
       return {
         ok: false,
-        detail: run.reason ?? `I only collected ${run.mined} of ${target} ${label}.`,
+        detail: run.mined > 0 ? `${reason} I collected ${run.mined} of ${target}.` : reason,
         count: run.mined,
         remaining: Math.max(0, target - run.mined),
       };

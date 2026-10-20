@@ -15,17 +15,24 @@ export interface PlayerPreference {
   updatedAt: number;
 }
 
-/** Rolling session state - cleared on restart. */
+/**
+ * Rolling session state - cleared on restart.
+ *
+ * The rolling windows are bounded (MAX_RECENT_* below) and their CONTENTS
+ * are read-only: the store owns the caps, so a caller must not be able to
+ * push into a window and grow the session - and the prompt built from it -
+ * past them.
+ */
 export interface ShortTermMemory {
   objective: string | null;
   targetPlayer: string | null;
   /** Most recent instructions, newest last. */
-  recentInstructions: Array<{ player: string; text: string; at: number }>;
+  recentInstructions: ReadonlyArray<{ player: string; text: string; at: number }>;
   /** Recent failures, used to stop the model repeating a mistake. */
-  recentFailures: Array<{ action: string; reason: string; at: number }>;
-  recentLocations: NamedLocation[];
+  recentFailures: ReadonlyArray<{ action: string; reason: string; at: number }>;
+  recentLocations: readonly NamedLocation[];
   /** Rolling chat window shown to the model. */
-  conversation: Array<{ player: string; text: string; at: number }>;
+  conversation: ReadonlyArray<{ player: string; text: string; at: number }>;
   conversationTurns: number;
 }
 
@@ -43,7 +50,14 @@ export interface MemorySnapshot {
 }
 
 export interface MemoryStore {
-  readonly shortTerm: ShortTermMemory;
+  /**
+   * The live session state.
+   *
+   * Read-only on purpose: the store keeps every rolling window capped, and
+   * this session is what the model is shown, so a caller must not be able
+   * to push into it and defeat those caps.
+   */
+  readonly shortTerm: Readonly<ShortTermMemory>;
   noteInstruction(player: string, text: string): void;
   noteFailure(action: string, reason: string): void;
   noteConversation(player: string, text: string): void;

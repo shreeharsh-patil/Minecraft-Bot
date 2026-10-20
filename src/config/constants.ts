@@ -1,5 +1,8 @@
 /**
- * Shared constants. Pure data only - no side effects, no imports.
+ * Shared constants. Pure data only - no side effects.
+ *
+ * `CONFLICT_GROUP` is re-exported from `src/types/task.ts` so that the
+ * conflict-group table exists exactly once in the codebase.
  */
 
 /** Prefix that marks a deterministic (non-AI) command. Mirrors BOT_PREFIX. */
@@ -10,15 +13,11 @@ export const DEFAULT_BOT_PREFIX = '!';
 /**
  * Conflict groups. Only one task per group may hold the bot at a time,
  * which is what stops "follow me" and "mine 20 logs" from fighting.
+ *
+ * Re-exported from `src/types/task.ts`, the single source of truth: the copy
+ * that used to live here was free to drift away from it.
  */
-export const CONFLICT_GROUP = {
-  MOVEMENT: 'movement',
-  MINING: 'mining',
-  BUILDING: 'building',
-  INVENTORY: 'inventory',
-  COMBAT: 'combat',
-  NONE: 'none',
-} as const;
+export { CONFLICT_GROUP } from '../types/task.js';
 
 /** Blocks that should never be walked into, dug through, or stood on. */
 export const DANGEROUS_BLOCKS: ReadonlySet<string> = new Set([
@@ -67,7 +66,6 @@ export const HOSTILE_MOB_FAMILIES: ReadonlySet<string> = new Set([
   'ravager',
   'pillager',
   'vindicator',
-  'breeze',
   // Missing from the original list: without them the bot did not see these
   // mobs as hostiles at all (a ghast was "other", so it never fled).
   'ghast',
@@ -77,6 +75,12 @@ export const HOSTILE_MOB_FAMILIES: ReadonlySet<string> = new Set([
   'skeleton_horse',
   'shulker',
   'breeze',
+  // Still missing, same failure mode: these mobs attack on sight in 1.21.1,
+  // so without them the guard walked past them and the bot never fled.
+  'bogged',
+  'elder_guardian',
+  'illusioner',
+  'zombified_piglin',
 ]);
 
 /** Tools preferred per block, best first. Keeps tool choice deterministic. */
@@ -96,7 +100,10 @@ export const BLOCK_TOOL: Readonly<Record<string, readonly string[]>> = {
   diorite: ['pickaxe'],
   granite: ['pickaxe'],
   calcite: ['pickaxe'],
-  obsidian: ['pickaxe', 'diamond_pickaxe'],
+  // Obsidian only drops itself for a diamond (or netherite) pickaxe, so the
+  // generic "pickaxe" is wrong here: a stone pickaxe breaks it and gets
+  // nothing back.
+  obsidian: ['diamond_pickaxe'],
   iron_ore: ['pickaxe'],
   gold_ore: ['pickaxe'],
   diamond_ore: ['pickaxe'],
@@ -116,7 +123,12 @@ export const BLOCK_TOOL: Readonly<Record<string, readonly string[]>> = {
   snow: ['shovel'],
 };
 
-/** Blocks that are typically safe to mine without a tool. */
+/**
+ * Blocks that are typically safe to mine without a tool.
+ *
+ * Stone and cobblestone are deliberately not here: they cannot be broken by
+ * hand at all, and `BLOCK_TOOL` already says they need a pickaxe.
+ */
 export const SOFT_BLOCKS: ReadonlySet<string> = new Set([
   'dirt',
   'grass_block',
@@ -138,8 +150,6 @@ export const SOFT_BLOCKS: ReadonlySet<string> = new Set([
   'short_grass',
   'vine',
   'lily_pad',
-  'stone',
-  'cobblestone',
 ]);
 
 /** Edible foods, best (safest, highest restore) first. */

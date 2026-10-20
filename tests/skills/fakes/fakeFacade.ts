@@ -430,6 +430,9 @@ export class FakeMinecraftFacade implements MinecraftFacade {
     if (this.undiggable.has(name)) return false;
     if (this.digDelayMs > 0) await sleep(this.digDelayMs);
     this.blocks.set(key(position), 'air');
+    // The block is gone, so it is no longer the bot's own construction -
+    // the real facade forgets it in exactly the same place.
+    this.ownBlocks.delete(key(position));
     this.dugPositions.push({ ...position });
     this.addItem(name, 1);
     return true;
@@ -504,16 +507,22 @@ export class FakeMinecraftFacade implements MinecraftFacade {
     const have = this.inventoryMap.get(item) ?? 0;
     if (have <= 0) return Promise.resolve(0);
 
-    // Fill existing stacks (max 64 each) before opening a new one.
+    // Fill the existing stack of THIS item (max 64) before opening a new one.
+    //
+    // Only stacks of the same item are topped up: the real facade transfers a
+    // single itemType, so a dirt deposit can never land in a cobblestone
+    // stack. Topping up whatever stack happened to have room turned 4 dirt
+    // into 4 cobblestone and hid the loss from every assertion.
     let stored = 0;
-    for (const [name, quantity] of contents) {
-      if (stored >= count) break;
-      const stackRoom = Math.max(0, 64 - quantity);
-      const space = Math.min(count - stored, stackRoom, this.chestCapacity - this.chestSize(contents));
-      if (space <= 0) continue;
-      contents.set(name, quantity + space);
-      stored += space;
-      this.depositTrace.push(space);
+    const existing = contents.get(item) ?? 0;
+    if (existing > 0) {
+      const stackRoom = Math.max(0, MAX_STACK_SIZE - existing);
+      const space = Math.min(count, stackRoom, this.chestCapacity - this.chestSize(contents));
+      if (space > 0) {
+        contents.set(item, existing + space);
+        stored = space;
+        this.depositTrace.push(space);
+      }
     }
     if (stored < count && this.chestSize(contents) < this.chestCapacity) {
       const space = Math.min(count - stored, this.chestCapacity - this.chestSize(contents));
@@ -560,6 +569,15 @@ export class FakeMinecraftFacade implements MinecraftFacade {
     return this.held;
   }
 
+  /**
+   * The tool the bot would pick for a block.
+   *
+   * The real facade can only offer the item the bot ALREADY HOLDS (it has no
+   * tool registry of its own). The fake answers from the `tools` table so a
+   * test can say "an iron axe is the right tool for an oak log" without
+   * having to model the whole inventory; the tool still has to be carried,
+   * or `equipItem` refuses it.
+   */
   public selectToolFor(blockName: string): Promise<string | null> {
     this.calls.push(`selectToolFor:${blockName}`);
     return Promise.resolve(this.tools[blockName] ?? null);

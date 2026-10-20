@@ -1,12 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { ACTION_TYPES } from '../../src/types/actions.js';
 import type { ActionType } from '../../src/types/actions.js';
 import { conflictGroupsFor, createSkillRegistry, getSkill } from '../../src/skills/index.js';
+import type { SkillRegistry } from '../../src/types/skill.js';
 import { FakeMinecraftFacade } from './fakes/fakeFacade.js';
 
 describe('skill registry', () => {
-  const facade = new FakeMinecraftFacade();
-  const registry = createSkillRegistry(facade);
+  // A fresh facade and registry per test: the registry skills MUTATE the
+  // facade (they walk, dig, place), so a shared one leaks state from one
+  // test into the next.
+  let facade: FakeMinecraftFacade;
+  let registry: SkillRegistry;
+
+  beforeEach(() => {
+    facade = new FakeMinecraftFacade();
+    registry = createSkillRegistry(facade);
+  });
 
   it('has a skill for every action type', () => {
     for (const type of ACTION_TYPES) {
